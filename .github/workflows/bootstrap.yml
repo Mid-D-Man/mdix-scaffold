@@ -1,0 +1,126 @@
+name: Bootstrap scaffold repo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .mdix directory
+        run: mkdir -p .mdix/project_structure
+
+      - name: Write starter template (skip if exists)
+        run: |
+          TARGET=".mdix/project_structure/project_structure.mdix"
+          if [ -f "$TARGET" ]; then
+            echo "Template already exists — skipping write."
+            exit 0
+          fi
+          cat > "$TARGET" << 'EOF'
+@CONFIG(
+  version    -> "1.0.0"
+  author     -> "YourName"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext) {
+    return {
+      name    = name
+      ext     = ext
+      content = ""
+    }
+  }
+
+  ~fc<object>(name, ext, content) {
+    return {
+      name    = name
+      ext     = ext
+      content = content
+    }
+  }
+
+  ~gitkeep<object>() {
+    return {
+      name    = ".gitkeep"
+      ext     = ""
+      content = ""
+    }
+  }
+)
+
+@DATA(
+  project_name  = "MyProject"
+  description   = "My project description"
+  hidden_prefix = "github"
+
+  github.workflows::
+    f("ci", "yml")
+
+  src::
+    f("main", "rs")
+    fc("README", "md", "# MyProject\n")
+
+  root::
+    fc("README", "md", "# MyProject\n")
+)
+EOF
+          echo "Wrote starter template to $TARGET"
+
+      - name: Write .gitignore (skip if exists)
+        run: |
+          if [ -f .gitignore ]; then
+            echo ".gitignore already exists — skipping."
+            exit 0
+          fi
+          cat > .gitignore << 'EOF'
+.mdix-bin/
+/tmp/
+.DS_Store
+**/.DS_Store
+EOF
+          echo "Wrote .gitignore"
+
+      - name: Write README.md (skip if exists)
+        run: |
+          if [ -f README.md ]; then
+            echo "README.md already exists — skipping."
+            exit 0
+          fi
+          cat > README.md << 'EOF'
+# mdix-scaffold
+
+Declarative project structure generator powered by [DixScript](https://github.com/Mid-D-Man/DixScript-Rust).
+
+## Quickstart
+
+1. Edit `.mdix/project_structure/project_structure.mdix`
+2. Run **Generate project structure** from the Actions tab
+3. Commit the generated files
+
+## Workflows
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| `bootstrap.yml` | Manual | One-time repo initialisation |
+| `generate-structure.yml` | Manual or push to `.mdix/**` | Create/update project structure |
+| `nuke-structure.yml` | Manual (type DELETE) | Remove generated files |
+EOF
+          echo "Wrote README.md"
+
+      - name: Commit bootstrap files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --staged --quiet \
+            && echo "Nothing to commit — already bootstrapped." \
+            || git commit -m "chore: bootstrap scaffold repo [skip ci]"
+          git push
