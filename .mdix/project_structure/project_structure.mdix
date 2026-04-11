@@ -1,0 +1,49 @@
+@CONFIG(
+  version    -> "1.0.0"
+  author     -> "YourName"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext) {
+    return {
+      name    = name
+      ext     = ext
+      content = ""
+    }
+  }
+
+  ~fc<object>(name, ext, content) {
+    return {
+      name    = name
+      ext     = ext
+      content = content
+    }
+  }
+
+  ~gitkeep<object>() {
+    return {
+      name    = ".gitkeep"
+      ext     = ""
+      content = ""
+    }
+  }
+)
+
+@DATA(
+  project_name  = "MyProject"
+  description   = "My project description"
+  hidden_prefix = "github"
+
+  github.workflows::
+    f("ci", "yml")
+
+  src::
+    f("main", "rs")
+    fc("README", "md", "# MyProject\n")
+
+  root::
+    fc("README", "md", "# MyProject\n")
+)
+
