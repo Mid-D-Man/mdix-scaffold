@@ -1,0 +1,338 @@
+name: Generate project structure
+
+on:
+  workflow_dispatch:
+    inputs:
+      template:
+        description: 'Path to .mdix template (relative to repo root)'
+        required: false
+        default: '.mdix/project_structure/project_structure.mdix'
+      override_stubs:
+        description: 'Overwrite existing stub files with fresh content (true/false)'
+        required: false
+        default: 'false'
+      dry_run:
+        description: 'Preview changes without writing anything (true/false)'
+        required: false
+        default: 'false'
+  push:
+    paths:
+      - '.mdix/project_structure/**'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Get weekly cache key
+        id: week
+        run: echo "key=$(date -u '+%Y-%U')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache mdix CLI binary
+        id: cache-mdix
+        uses: actions/cache@v4
+        with:
+          path: ~/.mdix-bin
+          key: mdix-cli-${{ runner.os }}-${{ steps.week.outputs.key }}
+          restore-keys: mdix-cli-${{ runner.os }}-
+
+      - name: Build mdix CLI (cache miss only)
+        if: steps.cache-mdix.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
+          cd /tmp/dixscript
+          cargo build -p mdix-cli --release
+          mkdir -p ~/.mdix-bin
+          cp target/release/mdix ~/.mdix-bin/mdix
+          echo "Built mdix CLI successfully."
+
+      - name: Install mdix to PATH
+        run: |
+          sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
+          mdix --version
+
+      - name: Validate template
+        run: |
+          TEMPLATE="${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
+          echo "Validating: $TEMPLATE"
+          mdix validate "$TEMPLATE"
+
+      - name: Convert template to JSON
+        run: |
+          TEMPLATE="${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
+          mdix convert "$TEMPLATE" --to json -o /tmp/structure.json
+          echo "Conversion complete. Keys resolved:"
+          python3 -c "import json; d=json.load(open('/tmp/structure.json')); [print('  ', k) for k in sorted(d.keys())]"
+
+      - name: Convert manifest to JSON (if exists)
+        run: |
+          if [ -f .mdix/.manifest.mdix ]; then
+            echo "Reading existing manifest..."
+            mdix convert .mdix/.manifest.mdix --to json -o /tmp/manifest.json
+          else
+            echo "No manifest yet — first run."
+          fi
+
+      - name: Generate project structure
+        env:
+          OVERRIDE_STUBS: ${{ github.event.inputs.override_stubs || 'false' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          TEMPLATE_PATH: ${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}
+        run: |
+          python3 << 'PYEOF'
+import json, os, re, sys, hashlib
+from datetime import datetime, timezone
+
+override_stubs = os.environ.get("OVERRIDE_STUBS", "false").lower() == "true"
+dry_run        = os.environ.get("DRY_RUN",        "false").lower() == "true"
+template_path  = os.environ.get("TEMPLATE_PATH",  ".mdix/project_structure/project_structure.mdix")
+
+if dry_run:
+    print("=== DRY RUN — no files will be written ===\n")
+
+# ── Load converted template ───────────────────────────────────────────────────
+with open("/tmp/structure.json") as fh:
+    data = json.load(fh)
+
+# ── Extract flat metadata from DATA section ───────────────────────────────────
+project_name  = data.get("project_name",  "UnknownProject")
+ngo_version   = data.get("ngo_version",   "1.7.1")
+utp_version   = data.get("utp_version",   "1.4.0")
+hidden_raw    = data.get("hidden_prefix",  "")
+hidden_set    = set(s.strip() for s in hidden_raw.split(",") if s.strip())
+
+print(f"Project       : {project_name}")
+print(f"Hidden prefix : {hidden_set or '(none)'}")
+print()
+
+# ── Load previous manifest if available ───────────────────────────────────────
+previously_created = set()
+manifest_json = "/tmp/manifest.json"
+if os.path.exists(manifest_json):
+    with open(manifest_json) as fh:
+        mdata = json.load(fh)
+    i = 0
+    while f"created_files[{i}]" in mdata:
+        previously_created.add(mdata[f"created_files[{i}]"])
+        i += 1
+    print(f"Manifest      : {len(previously_created)} previously tracked files\n")
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def key_to_dir(dotted_key):
+    """Convert dotted DATA key to a filesystem directory path.
+
+    Rules:
+      "root"             → "" (current directory)
+      "github.workflows" → ".github/workflows"  (if "github" in hidden_set)
+      "UnityProject.Assets.Scripts" → "UnityProject/Assets/Scripts"
+    """
+    if dotted_key == "root":
+        return ""
+    parts = dotted_key.split(".")
+    fs_parts = []
+    for i, part in enumerate(parts):
+        fs_parts.append(("." + part) if (i == 0 and part in hidden_set) else part)
+    return "/".join(fs_parts)
+
+def assemble_filename(entry):
+    """Build filename from a file entry object returned by a QuickFunc."""
+    name = entry.get("name", "").strip()
+    ext  = entry.get("ext",  "").strip()
+    if not name:
+        return None
+    return f"{name}.{ext}" if ext else name
+
+# Default stub content used when fc() content field is empty
+STUB_DEFAULTS = {
+    "cs":     "// Auto-generated stub\nusing UnityEngine;\n\npublic class {name} : MonoBehaviour\n{\n}\n",
+    "rs":     "// Auto-generated stub\n",
+    "yml":    "# Auto-generated stub — fill in implementation\n",
+    "yaml":   "# Auto-generated stub — fill in implementation\n",
+    "shader": "// Auto-generated shader stub\nShader \"Custom/{name}\" { }\n",
+    "toml":   "# Auto-generated config\n",
+    "json":   "{}\n",
+    "md":     "# {name}\n",
+}
+
+# ── Collect all indexed group array entries ───────────────────────────────────
+# The mdix converter produces flat JSON keys like "github.workflows[0]".
+# Each value is the object returned by the QuickFunc (name, ext, content).
+entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
+dir_groups = {}
+
+for key, value in data.items():
+    m = entry_re.match(key)
+    if m and isinstance(value, dict) and "name" in value:
+        dir_key = m.group(1)
+        idx     = int(m.group(2))
+        if dir_key not in dir_groups:
+            dir_groups[dir_key] = {}
+        dir_groups[dir_key][idx] = value
+
+print(f"Template defines {len(dir_groups)} directory group(s)\n")
+print("=== Processing ===\n")
+
+created    = []
+skipped    = []
+overridden = []
+
+for dir_key in sorted(dir_groups.keys()):
+    items    = dir_groups[dir_key]
+    dir_path = key_to_dir(dir_key)
+
+    # Ensure directory exists
+    if dir_path and not os.path.isdir(dir_path):
+        if not dry_run:
+            os.makedirs(dir_path, exist_ok=True)
+        print(f"  DIR  {dir_path}/")
+
+    for idx in sorted(items.keys()):
+        entry    = items[idx]
+        filename = assemble_filename(entry)
+        if not filename:
+            continue
+
+        raw_content = entry.get("content", "")
+        name_part   = entry.get("name", "")
+        ext_part    = entry.get("ext",  "")
+
+        # Use stub default when the template has no explicit content
+        if raw_content == "":
+            raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
+
+        filepath = os.path.join(dir_path, filename) if dir_path else filename
+
+        if os.path.exists(filepath):
+            if override_stubs:
+                if not dry_run:
+                    with open(filepath, "w") as fh:
+                        fh.write(raw_content)
+                overridden.append(filepath)
+                print(f"  OVR  {filepath}")
+            else:
+                skipped.append(filepath)
+        else:
+            if not dry_run:
+                parent = os.path.dirname(filepath)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(filepath, "w") as fh:
+                    fh.write(raw_content)
+            created.append(filepath)
+            print(f"  NEW  {filepath}")
+
+# ── Unity Packages manifest — special-cased ───────────────────────────────────
+# Content requires interpolating ngo_version/utp_version from template metadata,
+# which can't be done cleanly inside a DixScript string literal, so Python
+# handles it here using the flat properties read above.
+unity_manifest = "UnityProject/Packages/manifest.json"
+if not os.path.exists(unity_manifest):
+    if not dry_run:
+        os.makedirs(os.path.dirname(unity_manifest), exist_ok=True)
+        unity_pkg = {
+            "dependencies": {
+                "com.unity.netcode.gameobjects":        ngo_version,
+                "com.unity.transport":                  utp_version,
+                "com.unity.inputsystem":                "1.7.0",
+                "com.unity.2d.sprite":                  "1.0.0",
+                "com.unity.render-pipelines.universal": "14.0.9"
+            }
+        }
+        with open(unity_manifest, "w") as fh:
+            json.dump(unity_pkg, fh, indent=2)
+            fh.write("\n")
+    created.append(unity_manifest)
+    print(f"  NEW  {unity_manifest}  [Unity packages — interpolated from template metadata]")
+
+# ── Write .mdix manifest ──────────────────────────────────────────────────────
+if not dry_run:
+    os.makedirs(".mdix", exist_ok=True)
+
+    template_hash = ""
+    if os.path.exists(template_path):
+        with open(template_path, "rb") as tf:
+            template_hash = hashlib.sha256(tf.read()).hexdigest()[:12]
+
+    all_created = sorted(previously_created | set(created) | set(overridden))
+    files_block = "\n  ".join(f'"{p}"' for p in all_created) if all_created else '"(none)"'
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    manifest_content = (
+        "@CONFIG(\n"
+        f'  version    -> "1.0.0"\n'
+        f'  generated  -> "{now}"\n'
+        f'  features   -> "data"\n'
+        f'  debug_mode -> "off"\n'
+        ")\n\n"
+        "@DATA(\n"
+        f'  template      = "{template_path}"\n'
+        f'  template_hash = "{template_hash}"\n'
+        f'  last_run      = "{now}"\n'
+        f"  new_this_run  = {len(created)}\n"
+        f"  overridden    = {len(overridden)}\n"
+        f"  skipped       = {len(skipped)}\n"
+        "\n"
+        "  created_files::\n"
+        f"  {files_block}\n"
+        ")\n"
+    )
+
+    with open(".mdix/.manifest.mdix", "w") as mf:
+        mf.write(manifest_content)
+    print(f"\n  Manifest → .mdix/.manifest.mdix  (tracking {len(all_created)} files)")
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+print()
+print("=" * 44)
+print(f"  created   : {len(created)}")
+print(f"  overridden: {len(overridden)}")
+print(f"  skipped   : {len(skipped)} (already exist)")
+print("=" * 44)
+
+if dry_run:
+    print("\nDRY RUN complete — re-run with dry_run=false to apply.")
+PYEOF
+
+      - name: Write .gitignore (skip if exists)
+        run: |
+          if [ -f .gitignore ]; then
+            echo ".gitignore exists — skipping."
+            exit 0
+          fi
+          cat > .gitignore << 'EOF'
+projectile_core/target/
+UnityProject/Library/
+UnityProject/Temp/
+UnityProject/Logs/
+UnityProject/UserSettings/
+UnityProject/obj/
+UnityProject/Build/
+UnityProject/Builds/
+!UnityProject/Assets/Plugins/Native/**/*.dll
+!UnityProject/Assets/Plugins/Native/**/*.dylib
+!UnityProject/Assets/Plugins/Native/**/*.so
+.DS_Store
+**/.DS_Store
+EOF
+          echo "Wrote .gitignore"
+
+      - name: Show git status
+        run: git status --short || true
+
+      - name: Commit generated structure
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --staged --quiet \
+            && echo "Nothing new to commit — structure is already up to date." \
+            || git commit -m "chore: sync project structure from template [skip ci]"
+          git push
