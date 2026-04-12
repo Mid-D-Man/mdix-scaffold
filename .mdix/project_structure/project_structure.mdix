@@ -29,17 +29,30 @@
       content = ""
     }
   }
+
+  ~hidden<object>(segment) {
+    return {
+      segment = segment
+    }
+  }
 )
 
 @DATA(
-  project_name  = "my-project"
-  description   = "My project description"
-  author        = "YourName"
-  hidden_prefix = "github"
+  project_name = "my-project"
+  description  = "My project description"
+  author       = "YourName"
+
+  hidden_dirs::
+    hidden("github")
+    hidden("vscode")
 
   github.workflows::
-    f("ci", "yml")
+    f("ci",      "yml")
     f("release", "yml")
+
+  vscode::
+    fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
+    fc("settings",   "json", "{\n}\n")
 
   src::
     fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
@@ -58,7 +71,7 @@
 
   docs::
     fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
-    fc("architecture",    "md", "# Architecture\n\nDescribe the architecture here.\n")
+    fc("architecture",    "md", "# Architecture\n\nDescribe the high-level architecture here.\n")
 
   scripts::
     f("build",  "sh")
@@ -66,6 +79,6 @@
 
   root::
     fc("README",    "md",  "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
-    fc(".gitignore", "", "target/\ndist/\n.env\n.DS_Store\n**/.DS_Store\n")
-    fc("Cargo",     "toml", "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+    fc(".gitignore", "",   "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
+    fc("Cargo",     "toml","[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
 )
