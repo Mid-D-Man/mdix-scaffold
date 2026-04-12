@@ -8,16 +8,31 @@ on:
         required: false
         default: '.mdix/project_structure/project_structure.mdix'
       override_stubs:
-        description: 'Overwrite existing stub files with fresh content (true/false)'
+        description: 'Overwrite existing stub files (true/false)'
         required: false
         default: 'false'
       dry_run:
-        description: 'Preview changes without writing anything (true/false)'
+        description: 'Preview without writing anything (true/false)'
         required: false
         default: 'false'
   push:
     paths:
       - '.mdix/project_structure/**'
+  workflow_call:
+    inputs:
+      template:
+        description: 'Path to .mdix template'
+        required: false
+        type: string
+        default: '.mdix/project_structure/project_structure.mdix'
+      override_stubs:
+        required: false
+        type: string
+        default: 'false'
+      dry_run:
+        required: false
+        type: string
+        default: 'false'
 
 jobs:
   generate:
@@ -61,14 +76,14 @@ jobs:
 
       - name: Validate template
         run: |
-          TEMPLATE="${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
+          TEMPLATE="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
           echo "Validating: $TEMPLATE"
           mdix validate "$TEMPLATE"
           echo "Validation passed."
 
       - name: Convert template to JSON
         run: |
-          TEMPLATE="${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
+          TEMPLATE="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
           mdix convert "$TEMPLATE" --to json -o /tmp/structure.json
           echo "Resolved keys:"
           python3 -c "
@@ -83,16 +98,15 @@ for k in sorted(d.keys()):
           if [ -f .mdix/.manifest.mdix ]; then
             echo "Reading existing manifest..."
             mdix convert .mdix/.manifest.mdix --to json -o /tmp/manifest.json
-            echo "Manifest loaded."
           else
-            echo "No manifest found — this is the first run."
+            echo "No manifest found — first run."
           fi
 
       - name: Generate project structure
         env:
-          OVERRIDE_STUBS: ${{ github.event.inputs.override_stubs || 'false' }}
-          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-          TEMPLATE_PATH: ${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}
+          OVERRIDE_STUBS: ${{ inputs.override_stubs || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          TEMPLATE_PATH: ${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}
         run: |
           python3 << 'PYEOF'
 import json, os, re, sys, hashlib
@@ -108,12 +122,10 @@ if dry_run:
     print("=" * 48)
     print()
 
-# ── Load converted template JSON ──────────────────────────────────────────────
 with open("/tmp/structure.json") as fh:
     data = json.load(fh)
 
-# ── Build hidden segment set from hidden_dirs:: hidden("...") entries ─────────
-# hidden_dirs[0] = {"segment": "github"}, hidden_dirs[1] = {"segment": "vscode"} etc.
+# Build hidden segment set from hidden_dirs:: hidden("...") entries
 hidden_set = set()
 i = 0
 while True:
@@ -125,7 +137,6 @@ while True:
         hidden_set.add(entry["segment"].strip())
     i += 1
 
-# ── Extract flat metadata ─────────────────────────────────────────────────────
 project_name = data.get("project_name", "unknown-project")
 description  = data.get("description",  "")
 
@@ -135,7 +146,7 @@ print(f"Dry run    : {dry_run}")
 print(f"Override   : {override_stubs}")
 print()
 
-# ── Load previous manifest ────────────────────────────────────────────────────
+# Load previous manifest
 previously_created = set()
 if os.path.exists("/tmp/manifest.json"):
     with open("/tmp/manifest.json") as fh:
@@ -149,17 +160,7 @@ if os.path.exists("/tmp/manifest.json"):
     print(f"Manifest   : {len(previously_created)} previously tracked file(s)")
     print()
 
-# ── Key → directory path ──────────────────────────────────────────────────────
 def key_to_dir(dotted_key):
-    """
-    Convert a dotted DATA group-array key to a filesystem directory path.
-
-      "root"              → ""                 (current directory)
-      "github.workflows"  → ".github/workflows" (github is in hidden_set)
-      "vscode"            → ".vscode"           (vscode is in hidden_set)
-      "src.core"          → "src/core"
-      "UnityProject.Assets.Scripts" → "UnityProject/Assets/Scripts"
-    """
     if dotted_key == "root":
         return ""
     parts = dotted_key.split(".")
@@ -171,22 +172,13 @@ def key_to_dir(dotted_key):
             fs_parts.append(part)
     return "/".join(fs_parts)
 
-# ── Assemble filename from QuickFunc object ───────────────────────────────────
 def assemble_filename(entry):
-    """
-    Build the filename string from a file entry object.
-
-    f("main", "rs")          → "main.rs"
-    fc(".gitignore", "", "") → ".gitignore"
-    gitkeep()                → ".gitkeep"
-    """
     name = entry.get("name", "").strip()
     ext  = entry.get("ext",  "").strip()
     if not name:
         return None
     return f"{name}.{ext}" if ext else name
 
-# ── Stub content defaults (used when fc() content is empty string) ────────────
 STUB_DEFAULTS = {
     "rs":     "// Auto-generated stub\n",
     "cs":     "// Auto-generated stub\n",
@@ -216,9 +208,6 @@ STUB_DEFAULTS = {
     "css":    "/* Auto-generated stub */\n",
 }
 
-# ── Collect all group array entries from JSON ─────────────────────────────────
-# mdix convert produces flat keys like "src.core[0]" = {"name":"mod","ext":"rs","content":""}
-# We skip the "hidden_dirs" prefix since that is handled separately above.
 RESERVED_PREFIXES = {"hidden_dirs"}
 
 entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
@@ -228,9 +217,7 @@ for key, value in data.items():
     m = entry_re.match(key)
     if not m:
         continue
-    if not isinstance(value, dict):
-        continue
-    if "name" not in value:
+    if not isinstance(value, dict) or "name" not in value:
         continue
     dir_key = m.group(1)
     if dir_key in RESERVED_PREFIXES:
@@ -253,7 +240,6 @@ for dir_key in sorted(dir_groups.keys()):
     items    = dir_groups[dir_key]
     dir_path = key_to_dir(dir_key)
 
-    # Ensure the directory exists
     if dir_path and not os.path.isdir(dir_path):
         if not dry_run:
             os.makedirs(dir_path, exist_ok=True)
@@ -269,7 +255,6 @@ for dir_key in sorted(dir_groups.keys()):
         ext_part    = entry.get("ext",  "")
         raw_content = entry.get("content", "")
 
-        # Fill stub default when content field is empty string
         if raw_content == "":
             raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
 
@@ -295,7 +280,6 @@ for dir_key in sorted(dir_groups.keys()):
             created.append(filepath)
             print(f"  NEW  {filepath}")
 
-# ── Write manifest ────────────────────────────────────────────────────────────
 if not dry_run:
     os.makedirs(".mdix", exist_ok=True)
 
@@ -333,7 +317,6 @@ if not dry_run:
     print()
     print(f"  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
 
-# ── Summary ───────────────────────────────────────────────────────────────────
 print()
 print("=" * 48)
 print(f"  created   : {len(created)}")
@@ -347,11 +330,11 @@ if dry_run:
 PYEOF
 
       - name: Show git status
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ inputs.dry_run != 'true' }}
         run: git status --short || true
 
       - name: Commit generated structure
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ inputs.dry_run != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
