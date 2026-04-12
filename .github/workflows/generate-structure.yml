@@ -46,38 +46,46 @@ jobs:
       - name: Build mdix CLI (cache miss only)
         if: steps.cache-mdix.outputs.cache-hit != 'true'
         run: |
+          echo "Cache miss — building mdix CLI from source..."
           git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
           cd /tmp/dixscript
           cargo build -p mdix-cli --release
           mkdir -p ~/.mdix-bin
           cp target/release/mdix ~/.mdix-bin/mdix
-          echo "Built mdix CLI successfully."
+          echo "Build complete."
 
       - name: Install mdix to PATH
         run: |
           sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
-          mdix --version
+          echo "mdix version: $(mdix --version)"
 
       - name: Validate template
         run: |
           TEMPLATE="${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
           echo "Validating: $TEMPLATE"
           mdix validate "$TEMPLATE"
+          echo "Validation passed."
 
       - name: Convert template to JSON
         run: |
           TEMPLATE="${{ github.event.inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
           mdix convert "$TEMPLATE" --to json -o /tmp/structure.json
-          echo "Conversion complete. Keys resolved:"
-          python3 -c "import json; d=json.load(open('/tmp/structure.json')); [print('  ', k) for k in sorted(d.keys())]"
+          echo "Resolved keys:"
+          python3 -c "
+import json
+d = json.load(open('/tmp/structure.json'))
+for k in sorted(d.keys()):
+    print(f'  {k} = {str(d[k])[:60]}')
+"
 
       - name: Convert manifest to JSON (if exists)
         run: |
           if [ -f .mdix/.manifest.mdix ]; then
             echo "Reading existing manifest..."
             mdix convert .mdix/.manifest.mdix --to json -o /tmp/manifest.json
+            echo "Manifest loaded."
           else
-            echo "No manifest yet — first run."
+            echo "No manifest found — this is the first run."
           fi
 
       - name: Generate project structure
@@ -95,89 +103,147 @@ dry_run        = os.environ.get("DRY_RUN",        "false").lower() == "true"
 template_path  = os.environ.get("TEMPLATE_PATH",  ".mdix/project_structure/project_structure.mdix")
 
 if dry_run:
-    print("=== DRY RUN — no files will be written ===\n")
+    print("=" * 48)
+    print("  DRY RUN — no files will be written")
+    print("=" * 48)
+    print()
 
-# ── Load converted template ───────────────────────────────────────────────────
+# ── Load converted template JSON ──────────────────────────────────────────────
 with open("/tmp/structure.json") as fh:
     data = json.load(fh)
 
-# ── Extract flat metadata from DATA section ───────────────────────────────────
-project_name  = data.get("project_name",  "UnknownProject")
-ngo_version   = data.get("ngo_version",   "1.7.1")
-utp_version   = data.get("utp_version",   "1.4.0")
-hidden_raw    = data.get("hidden_prefix",  "")
-hidden_set    = set(s.strip() for s in hidden_raw.split(",") if s.strip())
+# ── Build hidden segment set from hidden_dirs:: hidden("...") entries ─────────
+# hidden_dirs[0] = {"segment": "github"}, hidden_dirs[1] = {"segment": "vscode"} etc.
+hidden_set = set()
+i = 0
+while True:
+    key = f"hidden_dirs[{i}]"
+    if key not in data:
+        break
+    entry = data[key]
+    if isinstance(entry, dict) and "segment" in entry:
+        hidden_set.add(entry["segment"].strip())
+    i += 1
 
-print(f"Project       : {project_name}")
-print(f"Hidden prefix : {hidden_set or '(none)'}")
+# ── Extract flat metadata ─────────────────────────────────────────────────────
+project_name = data.get("project_name", "unknown-project")
+description  = data.get("description",  "")
+
+print(f"Project    : {project_name}")
+print(f"Hidden     : {hidden_set or '(none)'}")
+print(f"Dry run    : {dry_run}")
+print(f"Override   : {override_stubs}")
 print()
 
-# ── Load previous manifest if available ───────────────────────────────────────
+# ── Load previous manifest ────────────────────────────────────────────────────
 previously_created = set()
-manifest_json = "/tmp/manifest.json"
-if os.path.exists(manifest_json):
-    with open(manifest_json) as fh:
+if os.path.exists("/tmp/manifest.json"):
+    with open("/tmp/manifest.json") as fh:
         mdata = json.load(fh)
-    i = 0
-    while f"created_files[{i}]" in mdata:
-        previously_created.add(mdata[f"created_files[{i}]"])
-        i += 1
-    print(f"Manifest      : {len(previously_created)} previously tracked files\n")
+    j = 0
+    while f"created_files[{j}]" in mdata:
+        val = mdata[f"created_files[{j}]"]
+        if isinstance(val, str):
+            previously_created.add(val)
+        j += 1
+    print(f"Manifest   : {len(previously_created)} previously tracked file(s)")
+    print()
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Key → directory path ──────────────────────────────────────────────────────
 def key_to_dir(dotted_key):
-    """Convert dotted DATA key to a filesystem directory path.
+    """
+    Convert a dotted DATA group-array key to a filesystem directory path.
 
-    Rules:
-      "root"             → "" (current directory)
-      "github.workflows" → ".github/workflows"  (if "github" in hidden_set)
+      "root"              → ""                 (current directory)
+      "github.workflows"  → ".github/workflows" (github is in hidden_set)
+      "vscode"            → ".vscode"           (vscode is in hidden_set)
+      "src.core"          → "src/core"
       "UnityProject.Assets.Scripts" → "UnityProject/Assets/Scripts"
     """
     if dotted_key == "root":
         return ""
     parts = dotted_key.split(".")
     fs_parts = []
-    for i, part in enumerate(parts):
-        fs_parts.append(("." + part) if (i == 0 and part in hidden_set) else part)
+    for idx, part in enumerate(parts):
+        if idx == 0 and part in hidden_set:
+            fs_parts.append("." + part)
+        else:
+            fs_parts.append(part)
     return "/".join(fs_parts)
 
+# ── Assemble filename from QuickFunc object ───────────────────────────────────
 def assemble_filename(entry):
-    """Build filename from a file entry object returned by a QuickFunc."""
+    """
+    Build the filename string from a file entry object.
+
+    f("main", "rs")          → "main.rs"
+    fc(".gitignore", "", "") → ".gitignore"
+    gitkeep()                → ".gitkeep"
+    """
     name = entry.get("name", "").strip()
     ext  = entry.get("ext",  "").strip()
     if not name:
         return None
     return f"{name}.{ext}" if ext else name
 
-# Default stub content used when fc() content field is empty
+# ── Stub content defaults (used when fc() content is empty string) ────────────
 STUB_DEFAULTS = {
-    "cs":     "// Auto-generated stub\nusing UnityEngine;\n\npublic class {name} : MonoBehaviour\n{\n}\n",
     "rs":     "// Auto-generated stub\n",
-    "yml":    "# Auto-generated stub — fill in implementation\n",
-    "yaml":   "# Auto-generated stub — fill in implementation\n",
-    "shader": "// Auto-generated shader stub\nShader \"Custom/{name}\" { }\n",
+    "cs":     "// Auto-generated stub\n",
+    "py":     "# Auto-generated stub\n",
+    "ts":     "// Auto-generated stub\n",
+    "js":     "// Auto-generated stub\n",
+    "go":     "// Auto-generated stub\n",
+    "java":   "// Auto-generated stub\n",
+    "cpp":    "// Auto-generated stub\n",
+    "c":      "// Auto-generated stub\n",
+    "h":      "// Auto-generated stub\n",
+    "hpp":    "// Auto-generated stub\n",
+    "kt":     "// Auto-generated stub\n",
+    "swift":  "// Auto-generated stub\n",
+    "lua":    "-- Auto-generated stub\n",
+    "shader": "// Auto-generated shader stub\n",
+    "yml":    "# Auto-generated stub\n",
+    "yaml":   "# Auto-generated stub\n",
+    "sh":     "#!/usr/bin/env bash\nset -euo pipefail\n\n# Auto-generated stub\n",
+    "bash":   "#!/usr/bin/env bash\nset -euo pipefail\n\n# Auto-generated stub\n",
+    "ps1":    "# Auto-generated stub\n",
     "toml":   "# Auto-generated config\n",
     "json":   "{}\n",
     "md":     "# {name}\n",
+    "xml":    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+    "html":   "<!DOCTYPE html>\n<html>\n<head><title>{name}</title></head>\n<body>\n</body>\n</html>\n",
+    "css":    "/* Auto-generated stub */\n",
 }
 
-# ── Collect all indexed group array entries ───────────────────────────────────
-# The mdix converter produces flat JSON keys like "github.workflows[0]".
-# Each value is the object returned by the QuickFunc (name, ext, content).
+# ── Collect all group array entries from JSON ─────────────────────────────────
+# mdix convert produces flat keys like "src.core[0]" = {"name":"mod","ext":"rs","content":""}
+# We skip the "hidden_dirs" prefix since that is handled separately above.
+RESERVED_PREFIXES = {"hidden_dirs"}
+
 entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
 dir_groups = {}
 
 for key, value in data.items():
     m = entry_re.match(key)
-    if m and isinstance(value, dict) and "name" in value:
-        dir_key = m.group(1)
-        idx     = int(m.group(2))
-        if dir_key not in dir_groups:
-            dir_groups[dir_key] = {}
-        dir_groups[dir_key][idx] = value
+    if not m:
+        continue
+    if not isinstance(value, dict):
+        continue
+    if "name" not in value:
+        continue
+    dir_key = m.group(1)
+    if dir_key in RESERVED_PREFIXES:
+        continue
+    idx = int(m.group(2))
+    if dir_key not in dir_groups:
+        dir_groups[dir_key] = {}
+    dir_groups[dir_key][idx] = value
 
-print(f"Template defines {len(dir_groups)} directory group(s)\n")
-print("=== Processing ===\n")
+print(f"Template defines {len(dir_groups)} directory group(s)")
+print()
+print("=== Processing ===")
+print()
 
 created    = []
 skipped    = []
@@ -187,7 +253,7 @@ for dir_key in sorted(dir_groups.keys()):
     items    = dir_groups[dir_key]
     dir_path = key_to_dir(dir_key)
 
-    # Ensure directory exists
+    # Ensure the directory exists
     if dir_path and not os.path.isdir(dir_path):
         if not dry_run:
             os.makedirs(dir_path, exist_ok=True)
@@ -199,11 +265,11 @@ for dir_key in sorted(dir_groups.keys()):
         if not filename:
             continue
 
-        raw_content = entry.get("content", "")
         name_part   = entry.get("name", "")
         ext_part    = entry.get("ext",  "")
+        raw_content = entry.get("content", "")
 
-        # Use stub default when the template has no explicit content
+        # Fill stub default when content field is empty string
         if raw_content == "":
             raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
 
@@ -218,6 +284,7 @@ for dir_key in sorted(dir_groups.keys()):
                 print(f"  OVR  {filepath}")
             else:
                 skipped.append(filepath)
+                print(f"  ---  {filepath}  (exists, kept)")
         else:
             if not dry_run:
                 parent = os.path.dirname(filepath)
@@ -228,30 +295,7 @@ for dir_key in sorted(dir_groups.keys()):
             created.append(filepath)
             print(f"  NEW  {filepath}")
 
-# ── Unity Packages manifest — special-cased ───────────────────────────────────
-# Content requires interpolating ngo_version/utp_version from template metadata,
-# which can't be done cleanly inside a DixScript string literal, so Python
-# handles it here using the flat properties read above.
-unity_manifest = "UnityProject/Packages/manifest.json"
-if not os.path.exists(unity_manifest):
-    if not dry_run:
-        os.makedirs(os.path.dirname(unity_manifest), exist_ok=True)
-        unity_pkg = {
-            "dependencies": {
-                "com.unity.netcode.gameobjects":        ngo_version,
-                "com.unity.transport":                  utp_version,
-                "com.unity.inputsystem":                "1.7.0",
-                "com.unity.2d.sprite":                  "1.0.0",
-                "com.unity.render-pipelines.universal": "14.0.9"
-            }
-        }
-        with open(unity_manifest, "w") as fh:
-            json.dump(unity_pkg, fh, indent=2)
-            fh.write("\n")
-    created.append(unity_manifest)
-    print(f"  NEW  {unity_manifest}  [Unity packages — interpolated from template metadata]")
-
-# ── Write .mdix manifest ──────────────────────────────────────────────────────
+# ── Write manifest ────────────────────────────────────────────────────────────
 if not dry_run:
     os.makedirs(".mdix", exist_ok=True)
 
@@ -260,8 +304,8 @@ if not dry_run:
         with open(template_path, "rb") as tf:
             template_hash = hashlib.sha256(tf.read()).hexdigest()[:12]
 
-    all_created = sorted(previously_created | set(created) | set(overridden))
-    files_block = "\n  ".join(f'"{p}"' for p in all_created) if all_created else '"(none)"'
+    all_tracked = sorted(previously_created | set(created) | set(overridden))
+    files_block = "\n    ".join(f'"{p}"' for p in all_tracked) if all_tracked else '"(none)"'
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     manifest_content = (
@@ -275,55 +319,35 @@ if not dry_run:
         f'  template      = "{template_path}"\n'
         f'  template_hash = "{template_hash}"\n'
         f'  last_run      = "{now}"\n'
-        f"  new_this_run  = {len(created)}\n"
-        f"  overridden    = {len(overridden)}\n"
-        f"  skipped       = {len(skipped)}\n"
+        f'  new_this_run  = {len(created)}\n'
+        f'  overridden    = {len(overridden)}\n'
+        f'  skipped       = {len(skipped)}\n'
         "\n"
         "  created_files::\n"
-        f"  {files_block}\n"
+        f"    {files_block}\n"
         ")\n"
     )
 
     with open(".mdix/.manifest.mdix", "w") as mf:
         mf.write(manifest_content)
-    print(f"\n  Manifest → .mdix/.manifest.mdix  (tracking {len(all_created)} files)")
+    print()
+    print(f"  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print()
-print("=" * 44)
+print("=" * 48)
 print(f"  created   : {len(created)}")
 print(f"  overridden: {len(overridden)}")
-print(f"  skipped   : {len(skipped)} (already exist)")
-print("=" * 44)
+print(f"  skipped   : {len(skipped)}")
+print("=" * 48)
 
 if dry_run:
-    print("\nDRY RUN complete — re-run with dry_run=false to apply.")
+    print()
+    print("DRY RUN complete — re-run with dry_run=false to apply.")
 PYEOF
 
-      - name: Write .gitignore (skip if exists)
-        run: |
-          if [ -f .gitignore ]; then
-            echo ".gitignore exists — skipping."
-            exit 0
-          fi
-          cat > .gitignore << 'EOF'
-projectile_core/target/
-UnityProject/Library/
-UnityProject/Temp/
-UnityProject/Logs/
-UnityProject/UserSettings/
-UnityProject/obj/
-UnityProject/Build/
-UnityProject/Builds/
-!UnityProject/Assets/Plugins/Native/**/*.dll
-!UnityProject/Assets/Plugins/Native/**/*.dylib
-!UnityProject/Assets/Plugins/Native/**/*.so
-.DS_Store
-**/.DS_Store
-EOF
-          echo "Wrote .gitignore"
-
       - name: Show git status
+        if: ${{ github.event.inputs.dry_run != 'true' }}
         run: git status --short || true
 
       - name: Commit generated structure
