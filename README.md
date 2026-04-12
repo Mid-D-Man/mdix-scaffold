@@ -1,77 +1,153 @@
 # mdix-scaffold
 
-Declarative, validated, idempotent project structure generator using [DixScript](https://github.com/Mid-D-Man/DixScript-Rust) `.mdix` files.
+A generic, declarative project structure generator powered by [DixScript](https://github.com/Mid-D-Man/DixScript-Rust).
+
+Define your project layout once in a `.mdix` file. Run the workflow. Done. Run it again and only new entries are added — existing files are never touched unless you explicitly ask.
+
+---
 
 ## How it works
+.mdix/project_structure/project_structure.mdix
+│
+▼
+mdix validate
+mdix convert --to json
+│
+▼
+python3 generator
+- reads dotted keys as directory paths
+- calls f() / fc() / gitkeep() results as file entries
+- diffs against .mdix/.manifest.mdix
+- creates only what is new
+│
+▼
+git commit [skip ci]
 
-Define your project structure in `.mdix/project_structure/project_structure.mdix` using DixScript's dotted group-array syntax. Each dotted key is a directory path; each array item is a file created by a QuickFunc call. Run the generate workflow and the structure appears — idempotently. Run it again and only new entries are created; existing files are never touched unless `override_stubs=true`.
+---
+
+## Template syntax
+
+Everything is in `@DATA`. Flat properties are metadata. Dotted group arrays are directories and their files.
 
 ```dixscript
+@CONFIG(
+  version  -> "1.0.0"
+  features -> "quickfuncs,data"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext)          { return { name = name, ext = ext, content = "" } }
+  ~fc<object>(name, ext, content){ return { name = name, ext = ext, content = content } }
+  ~gitkeep<object>()             { return { name = ".gitkeep", ext = "", content = "" } }
+)
+
 @DATA(
-  hidden_prefix = "github"   // "github" maps to ".github" on disk
+  project_name  = "my-app"
+  hidden_prefix = "github"      // "github" → ".github" on disk
 
   github.workflows::
-    f("ci", "yml")           // → .github/workflows/ci.yml  (stub)
+    f("ci",      "yml")         // → .github/workflows/ci.yml
+    f("release", "yml")         // → .github/workflows/release.yml
 
   src.core::
-    f("engine",  "rs")       // → src/core/engine.rs  (stub)
-    fc("mod", "rs", "pub mod engine;\n")  // → src/core/mod.rs  (with content)
+    f("lib",  "rs")             // → src/core/lib.rs   (stub)
+    f("util", "rs")             // → src/core/util.rs  (stub)
+
+  src::
+    fc("main", "rs", "fn main() {}\n")  // → src/main.rs  (with content)
+
+  assets::
+    gitkeep()                   // → assets/.gitkeep
+
+  root::
+    fc("README", "md", "# my-app\n")   // → README.md
+    fc(".gitignore", "", "target/\n")   // → .gitignore
 )
 ```
+
+### Key rules
+
+| Element | Meaning |
+|---|---|
+| `hidden_prefix = "github"` | Any top-level key matching this gets a leading `.` on disk |
+| `f(name, ext)` | Stub file — content comes from a sensible per-extension default |
+| `fc(name, ext, content)` | File with specific starting content |
+| `gitkeep()` | Creates a `.gitkeep` with no extension |
+| `root::` | Reserved — files land in the repository root |
+| `a.b.c::` | Everything after `::` goes inside `a/b/c/` |
+
+### Stub defaults
+
+When `f()` is used the generator fills in a minimal stub based on extension:
+
+| Extension | Default stub content |
+|---|---|
+| `rs` | `// stub` |
+| `cs` | `// stub` |
+| `py` | `# stub` |
+| `ts` | `// stub` |
+| `js` | `// stub` |
+| `yml` / `yaml` | `# stub` |
+| `md` | `# filename` |
+| `json` | `{}` |
+| `toml` | `# stub` |
+| `sh` | `#!/usr/bin/env bash` |
+| anything else | empty file |
+
+---
 
 ## Workflows
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `bootstrap.yml` | Manual | Initialises a blank fork of this repo with a starter template |
-| `generate-structure.yml` | Manual or push to `.mdix/**` | Creates/updates project structure from template |
-| `nuke-structure.yml` | Manual (must type `DELETE`) | Removes everything the generator created |
+| `bootstrap.yml` | Manual | One-time: creates `.mdix/` folder and starter template in a blank fork |
+| `generate-structure.yml` | Manual or push to `.mdix/**` | Generates or updates structure from template |
+| `nuke-structure.yml` | Manual — must type `DELETE` | Removes all files the generator created |
 
-## Generate workflow inputs
+### Generate inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `template` | `.mdix/project_structure/project_structure.mdix` | Path to the `.mdix` template file |
-| `override_stubs` | `false` | If `true`, overwrites existing stub files with fresh content |
-| `dry_run` | `false` | If `true`, prints what would happen without touching the filesystem |
+| `template` | `.mdix/project_structure/project_structure.mdix` | Which template to use |
+| `override_stubs` | `false` | Overwrite existing stub files |
+| `dry_run` | `false` | Preview without writing anything |
 
-## Template conventions
+---
 
-| Element | Purpose |
-|---|---|
-| `hidden_prefix = "github"` | Flat property: segments matching this get a leading `.` on disk |
-| `f(name, ext)` | QuickFunc: create a stub file (empty or extension-default content) |
-| `fc(name, ext, content)` | QuickFunc: create a file with specific starting content |
-| `gitkeep()` | QuickFunc: create a `.gitkeep` with no extension |
-| `root::` | Reserved key: files here go in the repository root |
-| `some.dotted.path::` | Group array: path segments become directory path `some/dotted/path/` |
+## How the CLI is sourced
+
+The generator needs `mdix` (the DixScript CLI) to validate and convert the template. Because this is a separate repo with no local machine required, the workflow:
+
+1. Checks the weekly binary cache
+2. On a cache miss: clones [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust), builds `mdix-cli --release`, saves to cache
+3. On a cache hit: skips the build entirely (~seconds)
+4. Copies the binary to `/usr/local/bin/mdix`
+
+No secrets, no tokens, no local setup. Everything runs inside the GitHub Actions VM.
+
+---
 
 ## Manifest
 
-After each run, `.mdix/.manifest.mdix` is written tracking every created file. On subsequent runs the generator diffs against this manifest — only new template entries are created. The manifest is itself valid DixScript and can be inspected with `mdix inspect .mdix/.manifest.mdix --keys`.
-
-## Extending the template
-
-Add a new directory and its files by adding a new group array entry in `@DATA`:
-
-```dixscript
-my.new.module::
-  f("core",  "rs")
-  f("utils", "rs")
-  fc("mod", "rs", "pub mod core;\npub mod utils;\n")
-```
-
-Push the change to `.mdix/project_structure/` and the workflow triggers automatically.
-
-## Building the CLI locally
+After each run `.mdix/.manifest.mdix` tracks every file that was created. It is itself valid DixScript — you can inspect it:
 
 ```bash
-git clone https://github.com/Mid-D-Man/DixScript-Rust.git
-cd DixScript-Rust
-cargo build -p mdix-cli --release
-./target/release/mdix validate .mdix/project_structure/project_structure.mdix
-./target/release/mdix convert .mdix/project_structure/project_structure.mdix --to json
+mdix inspect .mdix/.manifest.mdix --keys
 ```
+
+On re-runs the generator diffs new template entries against the manifest and only creates what is missing. Files in the manifest that no longer appear in the template are left alone (use the nuke workflow to clean up intentionally).
+
+---
+
+## Making it your own
+
+1. Fork this repo
+2. Run **Bootstrap scaffold repo** from the Actions tab (creates the `.mdix/` folder if missing)
+3. Edit `.mdix/project_structure/project_structure.mdix` to match your project shape
+4. Run **Generate project structure** — or push the template change and it runs automatically
+5. Delete this README and write your own
+
+---
 
 ## License
 
