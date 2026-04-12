@@ -1,98 +1,170 @@
 # mdix-scaffold
 
-A generic, declarative project structure generator powered by [DixScript](https://github.com/Mid-D-Man/DixScript-Rust).
+Declarative, idempotent project structure generator using
+[DixScript](https://github.com/Mid-D-Man/DixScript-Rust) `.mdix` files.
 
-Define your project layout once in a `.mdix` file. Run the workflow. Done. Run it again and only new entries are added — existing files are never touched unless you explicitly ask.
+Define your layout once in a `.mdix` file. Run a workflow. Done.
+Run it again — only new entries are added, existing files are never touched.
 
 ---
 
-## How it works
-.mdix/project_structure/project_structure.mdix
-│
-▼
-mdix validate
-mdix convert --to json
-│
-▼
-python3 generator
-- reads dotted keys as directory paths
-- calls f() / fc() / gitkeep() results as file entries
-- diffs against .mdix/.manifest.mdix
-- creates only what is new
-│
-▼
-git commit [skip ci]
+## Quickstart (two options)
+
+### Option A — Use as a reusable workflow (recommended)
+
+You only need **one file** in your repo. The scaffold repo does everything else.
+
+Create `.github/workflows/generate-structure.yml` in your repo:
+
+```yaml
+name: Generate project structure
+
+on:
+  workflow_dispatch:
+    inputs:
+      override_stubs:
+        description: 'Overwrite existing stubs (true/false)'
+        required: false
+        default: 'false'
+      dry_run:
+        description: 'Preview without writing (true/false)'
+        required: false
+        default: 'false'
+  push:
+    paths:
+      - '.mdix/**'
+
+jobs:
+  generate:
+    uses: Mid-D-Man/mdix-scaffold/.github/workflows/generate-structure.yml@main
+    permissions:
+      contents: write
+    with:
+      template:        '.mdix/project_structure/project_structure.mdix'
+      override_stubs:  ${{ inputs.override_stubs || 'false' }}
+      dry_run:         ${{ inputs.dry_run || 'false' }}
+```
+
+Then add your `.mdix/project_structure/project_structure.mdix` file and push.
+The workflow triggers automatically. That is all.
+
+### Option B — Fork this repo
+
+Fork mdix-scaffold, edit the template, run the workflows directly from the
+Actions tab of your fork.
+
+---
+
+## How the CLI is sourced
+
+No local tooling required. The generate workflow runs inside a GitHub Actions VM:
+
+1. Checks a **weekly binary cache** for the `mdix` CLI binary
+2. **Cache miss** — clones [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust),
+   runs `cargo build -p mdix-cli --release`, saves binary to cache (~3 min, once per week)
+3. **Cache hit** — skips the build entirely (seconds)
+4. Copies binary to `/usr/local/bin/mdix` and proceeds
+
+No secrets, no tokens, no local machine required.
 
 ---
 
 ## Template syntax
 
-Everything is in `@DATA`. Flat properties are metadata. Dotted group arrays are directories and their files.
+Everything lives in `.mdix/project_structure/project_structure.mdix`.
+
+### The four QuickFuncs
+
+```dixscript
+~f<object>(name, ext)                 // stub file — content from extension default
+~fc<object>(name, ext, content)       // file with specific starting content
+~gitkeep<object>()                    // .gitkeep (no extension)
+~hidden<object>(segment)              // mark segment as dot-prefixed on disk
+```
+
+### Full template structure
 
 ```dixscript
 @CONFIG(
-  version  -> "1.0.0"
-  features -> "quickfuncs,data"
+  version    -> "1.0.0"
+  author     -> "YourName"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
 )
 
 @QUICKFUNCS(
-  ~f<object>(name, ext)          { return { name = name, ext = ext, content = "" } }
-  ~fc<object>(name, ext, content){ return { name = name, ext = ext, content = content } }
-  ~gitkeep<object>()             { return { name = ".gitkeep", ext = "", content = "" } }
+  ~f<object>(name, ext) {
+    return { name = name, ext = ext, content = "" }
+  }
+  ~fc<object>(name, ext, content) {
+    return { name = name, ext = ext, content = content }
+  }
+  ~gitkeep<object>() {
+    return { name = ".gitkeep", ext = "", content = "" }
+  }
+  ~hidden<object>(segment) {
+    return { segment = segment }
+  }
 )
 
 @DATA(
-  project_name  = "my-app"
-  hidden_prefix = "github"      // "github" → ".github" on disk
+  project_name = "my-project"
+  description  = "What this project does"
+
+  // Segments listed here get a leading dot on disk
+  hidden_dirs::
+    hidden("github")          // github.* keys → .github/*
+    hidden("vscode")          // vscode key    → .vscode/
 
   github.workflows::
-    f("ci",      "yml")         // → .github/workflows/ci.yml
-    f("release", "yml")         // → .github/workflows/release.yml
+    f("ci",      "yml")       // → .github/workflows/ci.yml
+    f("release", "yml")       // → .github/workflows/release.yml
+
+  vscode::
+    fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
 
   src.core::
-    f("lib",  "rs")             // → src/core/lib.rs   (stub)
-    f("util", "rs")             // → src/core/util.rs  (stub)
-
-  src::
-    fc("main", "rs", "fn main() {}\n")  // → src/main.rs  (with content)
+    f("lib",  "rs")           // → src/core/lib.rs
+    f("util", "rs")           // → src/core/util.rs
+    fc("mod", "rs", "pub mod lib;\npub mod util;\n")
 
   assets::
-    gitkeep()                   // → assets/.gitkeep
+    gitkeep()                 // → assets/.gitkeep
 
   root::
-    fc("README", "md", "# my-app\n")   // → README.md
-    fc(".gitignore", "", "target/\n")   // → .gitignore
+    fc("README",    "md",  "# my-project\n")
+    fc(".gitignore", "",   "target/\n.env\n.DS_Store\n")
+    fc("Cargo",     "toml","[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
 )
 ```
 
-### Key rules
+### How dotted keys become paths
 
-| Element | Meaning |
-|---|---|
-| `hidden_prefix = "github"` | Any top-level key matching this gets a leading `.` on disk |
-| `f(name, ext)` | Stub file — content comes from a sensible per-extension default |
-| `fc(name, ext, content)` | File with specific starting content |
-| `gitkeep()` | Creates a `.gitkeep` with no extension |
-| `root::` | Reserved — files land in the repository root |
-| `a.b.c::` | Everything after `::` goes inside `a/b/c/` |
+| Template key | Disk path | Why |
+|---|---|---|
+| `root` | `./` | Reserved keyword |
+| `src` | `src/` | Plain segment |
+| `src.core` | `src/core/` | Dots become slashes |
+| `github.workflows` | `.github/workflows/` | `github` in `hidden_dirs` |
+| `vscode` | `.vscode/` | `vscode` in `hidden_dirs` |
 
 ### Stub defaults
 
-When `f()` is used the generator fills in a minimal stub based on extension:
+When `f(name, ext)` is used the generator fills a minimal default by extension:
 
-| Extension | Default stub content |
+| Extension(s) | Default content |
 |---|---|
-| `rs` | `// stub` |
-| `cs` | `// stub` |
-| `py` | `# stub` |
-| `ts` | `// stub` |
-| `js` | `// stub` |
-| `yml` / `yaml` | `# stub` |
+| `rs` `cs` `ts` `js` `go` `java` `cpp` `c` `h` `hpp` `kt` `swift` | `// Auto-generated stub` |
+| `py` | `# Auto-generated stub` |
+| `lua` | `-- Auto-generated stub` |
+| `sh` `bash` | `#!/usr/bin/env bash` + `set -euo pipefail` |
+| `yml` `yaml` | `# Auto-generated stub` |
 | `md` | `# filename` |
 | `json` | `{}` |
-| `toml` | `# stub` |
-| `sh` | `#!/usr/bin/env bash` |
-| anything else | empty file |
+| `toml` | `# Auto-generated config` |
+| `html` | Minimal HTML5 |
+| `css` | `/* Auto-generated stub */` |
+| anything else | Empty file |
 
 ---
 
@@ -100,52 +172,128 @@ When `f()` is used the generator fills in a minimal stub based on extension:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `bootstrap.yml` | Manual | One-time: creates `.mdix/` folder and starter template in a blank fork |
-| `generate-structure.yml` | Manual or push to `.mdix/**` | Generates or updates structure from template |
-| `nuke-structure.yml` | Manual — must type `DELETE` | Removes all files the generator created |
+| `bootstrap.yml` | Manual | Creates `.mdix/` folder and starter template in a blank fork |
+| `generate-structure.yml` | Manual or push to `.mdix/**` | Generates/updates structure. Also callable as a reusable workflow |
+| `nuke-structure.yml` | Manual — must type `DELETE` | Removes everything the generator created |
 
 ### Generate inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `template` | `.mdix/project_structure/project_structure.mdix` | Which template to use |
+| `template` | `.mdix/project_structure/project_structure.mdix` | Path to the template |
 | `override_stubs` | `false` | Overwrite existing stub files |
 | `dry_run` | `false` | Preview without writing anything |
 
 ---
 
-## How the CLI is sourced
+## Manifest
 
-The generator needs `mdix` (the DixScript CLI) to validate and convert the template. Because this is a separate repo with no local machine required, the workflow:
+After each run, `.mdix/.manifest.mdix` is written tracking every created file.
+It is itself valid DixScript and can be inspected:
 
-1. Checks the weekly binary cache
-2. On a cache miss: clones [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust), builds `mdix-cli --release`, saves to cache
-3. On a cache hit: skips the build entirely (~seconds)
-4. Copies the binary to `/usr/local/bin/mdix`
+```
+mdix inspect .mdix/.manifest.mdix --keys
+mdix convert .mdix/.manifest.mdix --to json
+```
 
-No secrets, no tokens, no local setup. Everything runs inside the GitHub Actions VM.
+On re-runs the generator diffs new template entries against the manifest.
+Already-created files are skipped. Files removed from the template are left
+alone — use the nuke workflow to clean up intentionally.
 
 ---
 
-## Manifest
+## Testing with only the GitHub website
 
-After each run `.mdix/.manifest.mdix` tracks every file that was created. It is itself valid DixScript — you can inspect it:
+No laptop, no VS Code, no github.dev needed. Everything below uses only
+the github.com web interface.
 
-```bash
-mdix inspect .mdix/.manifest.mdix --keys
+### Step 1 — Create a new repo
+
+github.com → click **+** (top right) → **New repository** → give it a name →
+tick **Add a README file** → **Create repository**.
+
+### Step 2 — Create files using the web editor
+
+For each file you need to create:
+
+1. In the repo, click **Add file → Create new file**
+2. In the name box at the top, type the full path including folders.
+   GitHub creates folders automatically when you type a `/`.
+   For example, type `.github/workflows/generate-structure.yml` —
+   as you type each `/` the box splits into a new folder segment.
+3. Paste the file content into the editor below
+4. Scroll down → click **Commit new file**
+5. Repeat for the next file
+
+Files to create in this order:
+
+```
+.github/workflows/bootstrap.yml
+.github/workflows/generate-structure.yml
+.github/workflows/nuke-structure.yml
+.mdix/project_structure/project_structure.mdix
 ```
 
-On re-runs the generator diffs new template entries against the manifest and only creates what is missing. Files in the manifest that no longer appear in the template are left alone (use the nuke workflow to clean up intentionally).
+The README is already there from Step 1 — you can edit it by clicking the
+pencil icon on the file view.
+
+### Step 3 — Enable Actions
+
+Click the **Actions** tab. If GitHub shows a warning banner, click
+**"I understand my workflows, go ahead and enable them"**.
+
+### Step 4 — Dry run
+
+**Actions → Generate project structure → Run workflow**
+
+Set `dry_run = true`. Click **Run workflow**.
+
+Open the running job and expand the **Generate project structure** step.
+You should see every `DIR` and `NEW` line that would be created, with no
+files actually written.
+
+### Step 5 — Real run
+
+Run again with `dry_run = false`. When the job finishes, go to the
+**Code** tab — the generated files are there in a new commit from
+`github-actions[bot]`.
+
+### Step 6 — Test idempotency
+
+Run again without changing anything. Every file should show
+`--- (exists, kept)` and the commit step should print
+`Nothing new to commit`.
+
+### Step 7 — Test a change
+
+Go to `.mdix/project_structure/project_structure.mdix` → click the pencil
+icon → add a new file entry to any group array → click **Commit changes**.
+
+Committing to `.mdix/project_structure/` triggers the generate workflow
+automatically. Only the new entry appears as `NEW`.
+
+### Step 8 — Test nuke
+
+**Actions → Nuke project structure → Run workflow** → type `DELETE` → **Run workflow**.
+All generated files are removed in a commit.
 
 ---
 
 ## Making it your own
 
-1. Fork this repo
-2. Run **Bootstrap scaffold repo** from the Actions tab (creates the `.mdix/` folder if missing)
-3. Edit `.mdix/project_structure/project_structure.mdix` to match your project shape
-4. Run **Generate project structure** — or push the template change and it runs automatically
-5. Delete this README and write your own
+If using the reusable workflow (Option A above):
+
+1. Create the tiny caller workflow shown in the Quickstart section
+2. Create your `.mdix/project_structure/project_structure.mdix`
+3. Push — the workflow runs automatically
+
+If forking (Option B):
+
+1. Fork this repo on github.com
+2. Edit `.mdix/project_structure/project_structure.mdix` via the web editor
+3. Run **Generate project structure** from the Actions tab
+
+The template is the only file you need to understand and edit.
 
 ---
 
