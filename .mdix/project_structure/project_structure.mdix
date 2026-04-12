@@ -32,18 +32,40 @@
 )
 
 @DATA(
-  project_name  = "MyProject"
+  project_name  = "my-project"
   description   = "My project description"
+  author        = "YourName"
   hidden_prefix = "github"
 
   github.workflows::
     f("ci", "yml")
+    f("release", "yml")
 
   src::
-    f("main", "rs")
-    fc("README", "md", "# MyProject\n")
+    fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
+
+  src.core::
+    f("mod",  "rs")
+    f("lib",  "rs")
+    f("util", "rs")
+
+  src.models::
+    f("mod", "rs")
+
+  tests::
+    f("integration", "rs")
+    gitkeep()
+
+  docs::
+    fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
+    fc("architecture",    "md", "# Architecture\n\nDescribe the architecture here.\n")
+
+  scripts::
+    f("build",  "sh")
+    f("deploy", "sh")
 
   root::
-    fc("README", "md", "# MyProject\n")
+    fc("README",    "md",  "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
+    fc(".gitignore", "", "target/\ndist/\n.env\n.DS_Store\n**/.DS_Store\n")
+    fc("Cargo",     "toml", "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
 )
-
