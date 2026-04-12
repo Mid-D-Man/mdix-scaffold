@@ -7,7 +7,7 @@ on:
         description: 'Type DELETE to confirm removal of all generated files'
         required: true
       template:
-        description: 'Path to .mdix template (to know what to remove)'
+        description: 'Path to .mdix template (so we know what to remove)'
         required: false
         default: '.mdix/project_structure/project_structure.mdix'
 
@@ -23,10 +23,10 @@ jobs:
       - name: Guard — require exact confirmation
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "DELETE" ]; then
-            echo "::error::Confirmation failed. You must type exactly: DELETE"
+            echo "::error::You must type exactly: DELETE"
             exit 1
           fi
-          echo "Confirmation accepted. Proceeding with removal."
+          echo "Confirmation accepted."
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,10 +55,9 @@ jobs:
       - name: Install mdix to PATH
         run: sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
 
-      - name: Convert template to JSON
+      - name: Validate and convert template
         run: |
           TEMPLATE="${{ github.event.inputs.template }}"
-          echo "Reading template: $TEMPLATE"
           mdix validate "$TEMPLATE"
           mdix convert "$TEMPLATE" --to json -o /tmp/structure.json
 
@@ -70,16 +69,30 @@ import json, os, re
 with open("/tmp/structure.json") as fh:
     data = json.load(fh)
 
-hidden_raw = data.get("hidden_prefix", "")
-hidden_set = set(s.strip() for s in hidden_raw.split(",") if s.strip())
+# ── Build hidden segment set ──────────────────────────────────────────────────
+hidden_set = set()
+i = 0
+while True:
+    key = f"hidden_dirs[{i}]"
+    if key not in data:
+        break
+    entry = data[key]
+    if isinstance(entry, dict) and "segment" in entry:
+        hidden_set.add(entry["segment"].strip())
+    i += 1
+
+RESERVED_PREFIXES = {"hidden_dirs"}
 
 def key_to_dir(dotted_key):
     if dotted_key == "root":
         return ""
     parts = dotted_key.split(".")
     fs_parts = []
-    for i, part in enumerate(parts):
-        fs_parts.append(("." + part) if (i == 0 and part in hidden_set) else part)
+    for idx, part in enumerate(parts):
+        if idx == 0 and part in hidden_set:
+            fs_parts.append("." + part)
+        else:
+            fs_parts.append(part)
     return "/".join(fs_parts)
 
 def assemble_filename(entry):
@@ -89,21 +102,25 @@ def assemble_filename(entry):
         return None
     return f"{name}.{ext}" if ext else name
 
-entry_re = re.compile(r'^(.+)\[(\d+)\]$')
+entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
 dir_groups = {}
 
 for key, value in data.items():
     m = entry_re.match(key)
-    if m and isinstance(value, dict) and "name" in value:
-        dir_key = m.group(1)
-        idx     = int(m.group(2))
-        if dir_key not in dir_groups:
-            dir_groups[dir_key] = {}
-        dir_groups[dir_key][idx] = value
+    if not m:
+        continue
+    if not isinstance(value, dict) or "name" not in value:
+        continue
+    dir_key = m.group(1)
+    if dir_key in RESERVED_PREFIXES:
+        continue
+    idx = int(m.group(2))
+    if dir_key not in dir_groups:
+        dir_groups[dir_key] = {}
+    dir_groups[dir_key][idx] = value
 
 removed = []
 missing = []
-
 print("=== Removing files ===\n")
 
 for dir_key in sorted(dir_groups.keys()):
@@ -120,20 +137,13 @@ for dir_key in sorted(dir_groups.keys()):
             print(f"  DEL  {filepath}")
         else:
             missing.append(filepath)
+            print(f"  ---  {filepath}  (already absent)")
 
-# Also remove Unity manifest if it exists (special-cased in generator)
-unity_manifest = "UnityProject/Packages/manifest.json"
-if os.path.exists(unity_manifest):
-    os.remove(unity_manifest)
-    removed.append(unity_manifest)
-    print(f"  DEL  {unity_manifest}")
-
-# Remove empty directories (deepest first to handle nested empties)
+# Remove empty directories deepest-first
 dirs_seen = set()
 for dir_key in dir_groups.keys():
     dir_path = key_to_dir(dir_key)
     if dir_path:
-        # Collect this dir and all parents
         parts = dir_path.split("/")
         for depth in range(len(parts), 0, -1):
             dirs_seen.add("/".join(parts[:depth]))
@@ -143,22 +153,20 @@ for dir_path in sorted(dirs_seen, reverse=True):
         os.rmdir(dir_path)
         print(f"  RMD  {dir_path}/")
 
-# Remove manifest
-manifest_path = ".mdix/.manifest.mdix"
-if os.path.exists(manifest_path):
-    os.remove(manifest_path)
-    print(f"  DEL  {manifest_path}")
-
-# Remove .mdix dir if empty
+# Remove manifest and .mdix dir if empty
+manifest = ".mdix/.manifest.mdix"
+if os.path.exists(manifest):
+    os.remove(manifest)
+    print(f"  DEL  {manifest}")
 if os.path.isdir(".mdix") and not os.listdir(".mdix"):
     os.rmdir(".mdix")
     print("  RMD  .mdix/")
 
 print()
-print("=" * 44)
+print("=" * 48)
 print(f"  removed : {len(removed)}")
-print(f"  absent  : {len(missing)} (already gone)")
-print("=" * 44)
+print(f"  absent  : {len(missing)}")
+print("=" * 48)
 PYEOF
 
       - name: Show git status
@@ -170,6 +178,6 @@ PYEOF
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git diff --staged --quiet \
-            && echo "Nothing to remove — structure was already clean." \
+            && echo "Nothing to commit — structure was already clean." \
             || git commit -m "chore: nuke project structure [skip ci]"
           git push
