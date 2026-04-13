@@ -23,64 +23,64 @@ jobs:
             exit 0
           fi
           cat > "$TARGET" << 'MDIXEOF'
-@CONFIG(
-  version    -> "1.0.0"
-  author     -> "YourName"
-  features   -> "quickfuncs,data"
-  debug_mode -> "off"
-)
-
-@QUICKFUNCS(
-  ~f<object>(name, ext) {
-    return {
-      name    = name
-      ext     = ext
-      content = ""
-    }
-  }
-
-  ~fc<object>(name, ext, content) {
-    return {
-      name    = name
-      ext     = ext
-      content = content
-    }
-  }
-
-  ~gitkeep<object>() {
-    return {
-      name    = ".gitkeep"
-      ext     = ""
-      content = ""
-    }
-  }
-
-  ~hidden<object>(segment) {
-    return {
-      segment = segment
-    }
-  }
-)
-
-@DATA(
-  project_name = "my-project"
-  description  = "My project description"
-  author       = "YourName"
-
-  hidden_dirs::
-    hidden("github")
-
-  github.workflows::
-    f("ci", "yml")
-
-  src::
-    fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
-
-  root::
-    fc("README",    "md",  "# my-project\n\nMy project description.\n")
-    fc(".gitignore", "",   "target/\ndist/\n.env\n.DS_Store\n**/.DS_Store\n")
-)
-MDIXEOF
+          @CONFIG(
+            version    -> "1.0.0"
+            author     -> "YourName"
+            features   -> "quickfuncs,data"
+            debug_mode -> "off"
+          )
+          
+          @QUICKFUNCS(
+            ~f<object>(name, ext) {
+              return {
+                name    = name
+                ext     = ext
+                content = ""
+              }
+            }
+          
+            ~fc<object>(name, ext, content) {
+              return {
+                name    = name
+                ext     = ext
+                content = content
+              }
+            }
+          
+            ~gitkeep<object>() {
+              return {
+                name    = ".gitkeep"
+                ext     = ""
+                content = ""
+              }
+            }
+          
+            ~hidden<object>(segment) {
+              return {
+                segment = segment
+              }
+            }
+          )
+          
+          @DATA(
+            project_name = "my-project"
+            description  = "My project description"
+            author       = "YourName"
+          
+            hidden_dirs::
+              hidden("github")
+          
+            github.workflows::
+              f("ci", "yml")
+          
+            src::
+              fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
+          
+            root::
+              fc("README",    "md",  "# my-project\n\nMy project description.\n")
+              fc(".gitignore", "",   "target/\ndist/\n.env\n.DS_Store\n**/.DS_Store\n")
+          )
+          MDIXEOF
           echo "Wrote starter template to $TARGET"
 
       - name: Write README.md (skip if exists)
@@ -90,18 +90,18 @@ MDIXEOF
             exit 0
           fi
           cat > README.md << 'EOF'
-# mdix-scaffold
-
-Declarative project structure generator using DixScript `.mdix` files.
-
-## Quickstart
-
-1. Edit `.mdix/project_structure/project_structure.mdix`
-2. Run **Generate project structure** from the Actions tab
-3. Commit the result
-
-See the full documentation in this file for template syntax.
-EOF
+          # mdix-scaffold
+          
+          Declarative project structure generator using DixScript `.mdix` files.
+          
+          ## Quickstart
+          
+          1. Edit `.mdix/project_structure/project_structure.mdix`
+          2. Run **Generate project structure** from the Actions tab
+          3. Commit the result
+          
+          See the full documentation in this file for template syntax.
+          EOF
           echo "Wrote README.md"
 
       - name: Commit bootstrap files
