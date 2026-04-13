@@ -23,7 +23,7 @@ jobs:
             echo "Template already exists at $TARGET — skipping write."
             exit 0
           fi
-          
+
           cat > "$TARGET" << 'MDIXEOF'
           @CONFIG(
             version    -> "1.0.0"
@@ -31,7 +31,7 @@ jobs:
             features   -> "quickfuncs,data"
             debug_mode -> "off"
           )
-          
+
           @QUICKFUNCS(
             ~f<object>(name, ext) {
               return {
@@ -40,7 +40,7 @@ jobs:
                 content = ""
               }
             }
-          
+
             ~fc<object>(name, ext, content) {
               return {
                 name    = name
@@ -48,7 +48,7 @@ jobs:
                 content = content
               }
             }
-          
+
             ~gitkeep<object>() {
               return {
                 name    = ".gitkeep"
@@ -56,34 +56,64 @@ jobs:
                 content = ""
               }
             }
-          
+
             ~hidden<object>(segment) {
               return {
                 segment = segment
               }
             }
           )
-          
+
           @DATA(
             project_name = "my-project"
             description  = "My project description"
             author       = "YourName"
-          
+
+            // NOTE: github.workflows entries are intentionally excluded from
+            // this starter template. Writing files into .github/workflows/
+            // requires the workflows:write OAuth scope, which GITHUB_TOKEN
+            // does not hold by default. See README for how to enable it.
+            // If you do not need to generate workflow stubs, ignore this note.
+
+            // hidden_dirs declares which top-level key segments get a leading
+            // dot on disk. Example: hidden("vscode") makes vscode -> .vscode/
             hidden_dirs::
-              hidden("github")
-          
-            github.workflows::
-              f("ci", "yml")
-          
+              hidden("vscode")
+
+            vscode::
+              fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
+              fc("settings",   "json", "{\n}\n")
+
             src::
               fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
-          
+
+            src.core::
+              f("mod",  "rs")
+              f("lib",  "rs")
+              f("util", "rs")
+
+            src.models::
+              f("mod", "rs")
+
+            tests::
+              f("integration", "rs")
+              gitkeep()
+
+            docs::
+              fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
+              fc("architecture",    "md", "# Architecture\n\nDescribe the high-level architecture here.\n")
+
+            scripts::
+              f("build",  "sh")
+              f("deploy", "sh")
+
             root::
-              fc("README",    "md",  "# my-project\n\nMy project description.\n")
-              fc(".gitignore", "",   "target/\ndist/\n.env\n.DS_Store\n**/.DS_Store\n")
+              fc("README",    "md",  "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
+              fc(".gitignore", "",   "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
+              fc("Cargo",     "toml","[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
           )
           MDIXEOF
-          
+
           echo "Wrote starter template to $TARGET"
 
       - name: Write README.md (skip if exists)
@@ -94,15 +124,25 @@ jobs:
           fi
           cat > README.md << 'EOF'
           # mdix-scaffold
-          
+
           Declarative project structure generator using DixScript `.mdix` files.
-          
+
           ## Quickstart
-          
+
           1. Edit `.mdix/project_structure/project_structure.mdix`
           2. Run **Generate project structure** from the Actions tab
           3. Commit the result
-          
+
+          ## Note on .github/workflows/ entries
+
+          Generating files inside `.github/workflows/` requires `workflows:write`
+          permission on the token used for checkout. GITHUB_TOKEN does not hold
+          this scope by default. Options:
+
+          - **Recommended**: keep `github.workflows::` entries out of your template.
+          - **Advanced**: create a PAT with `contents:write` + `workflows:write`,
+            store it as `secrets.WORKFLOW_RW_TOKEN`, and pass it to actions/checkout.
+
           See the full documentation in this file for template syntax.
           EOF
           echo "Wrote README.md"
