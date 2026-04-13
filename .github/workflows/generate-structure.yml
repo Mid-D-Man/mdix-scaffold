@@ -39,7 +39,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      workflows: write
+      # workflows: write is intentionally omitted.
+      #
+      # GITHUB_TOKEN can only hold this scope when the repo has
+      # "Read and write permissions" enabled AND the checkout token
+      # has the OAuth workflows scope — which requires a PAT.
+      #
+      # Option A (recommended): keep github.workflows:: entries OUT of
+      #   your .mdix template. The scaffold does not need to generate
+      #   workflow files to function correctly.
+      #
+      # Option B (advanced): create a fine-grained PAT with
+      #   contents:write + workflows:write, store it as
+      #   secrets.WORKFLOW_RW_TOKEN, then add to the checkout step:
+      #     with:
+      #       token: ${{ secrets.WORKFLOW_RW_TOKEN }}
+      #   and restore this line:
+      #     workflows: write
 
     steps:
       - name: Checkout repository
@@ -108,20 +124,20 @@ jobs:
           python3 << 'PYEOF'
           import json, os, re, sys, hashlib
           from datetime import datetime, timezone
-          
+
           override_stubs = os.environ.get("OVERRIDE_STUBS", "false").lower() == "true"
           dry_run        = os.environ.get("DRY_RUN",        "false").lower() == "true"
           template_path  = os.environ.get("TEMPLATE_PATH",  ".mdix/project_structure/project_structure.mdix")
-          
+
           if dry_run:
               print("=" * 48)
               print("  DRY RUN — no files will be written")
               print("=" * 48)
               print()
-          
+
           with open("/tmp/structure.json") as fh:
               data = json.load(fh)
-          
+
           hidden_set = set()
           i = 0
           while True:
@@ -132,16 +148,16 @@ jobs:
               if isinstance(entry, dict) and "segment" in entry:
                   hidden_set.add(entry["segment"].strip())
               i += 1
-          
+
           project_name = data.get("project_name", "unknown-project")
           description  = data.get("description",  "")
-          
+
           print(f"Project    : {project_name}")
           print(f"Hidden     : {hidden_set or '(none)'}")
           print(f"Dry run    : {dry_run}")
           print(f"Override   : {override_stubs}")
           print()
-          
+
           previously_created = set()
           if os.path.exists("/tmp/manifest.json"):
               with open("/tmp/manifest.json") as fh:
@@ -154,7 +170,7 @@ jobs:
                   j += 1
               print(f"Manifest   : {len(previously_created)} previously tracked file(s)")
               print()
-          
+
           def key_to_dir(dotted_key):
               if dotted_key == "root":
                   return ""
@@ -166,14 +182,14 @@ jobs:
                   else:
                       fs_parts.append(part)
               return "/".join(fs_parts)
-          
+
           def assemble_filename(entry):
               name = entry.get("name", "").strip()
               ext  = entry.get("ext",  "").strip()
               if not name:
                   return None
               return f"{name}.{ext}" if ext else name
-          
+
           STUB_DEFAULTS = {
               "rs":     "// Auto-generated stub\n",
               "cs":     "// Auto-generated stub\n",
@@ -202,12 +218,12 @@ jobs:
               "html":   "<!DOCTYPE html>\n<html>\n<head><title>{name}</title></head>\n<body>\n</body>\n</html>\n",
               "css":    "/* Auto-generated stub */\n",
           }
-          
+
           RESERVED_PREFIXES = {"hidden_dirs"}
-          
+
           entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
           dir_groups = {}
-          
+
           for key, value in data.items():
               m = entry_re.match(key)
               if not m:
@@ -221,40 +237,40 @@ jobs:
               if dir_key not in dir_groups:
                   dir_groups[dir_key] = {}
               dir_groups[dir_key][idx] = value
-          
+
           print(f"Template defines {len(dir_groups)} directory group(s)")
           print()
           print("=== Processing ===")
           print()
-          
+
           created    = []
           skipped    = []
           overridden = []
-          
+
           for dir_key in sorted(dir_groups.keys()):
               items    = dir_groups[dir_key]
               dir_path = key_to_dir(dir_key)
-          
+
               if dir_path and not os.path.isdir(dir_path):
                   if not dry_run:
                       os.makedirs(dir_path, exist_ok=True)
                   print(f"  DIR  {dir_path}/")
-          
+
               for idx in sorted(items.keys()):
                   entry    = items[idx]
                   filename = assemble_filename(entry)
                   if not filename:
                       continue
-          
+
                   name_part   = entry.get("name", "")
                   ext_part    = entry.get("ext",  "")
                   raw_content = entry.get("content", "")
-          
+
                   if raw_content == "":
                       raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
-          
+
                   filepath = os.path.join(dir_path, filename) if dir_path else filename
-          
+
                   if os.path.exists(filepath):
                       if override_stubs:
                           if not dry_run:
@@ -274,19 +290,19 @@ jobs:
                               fh.write(raw_content)
                       created.append(filepath)
                       print(f"  NEW  {filepath}")
-          
+
           if not dry_run:
               os.makedirs(".mdix", exist_ok=True)
-          
+
               template_hash = ""
               if os.path.exists(template_path):
                   with open(template_path, "rb") as tf:
                       template_hash = hashlib.sha256(tf.read()).hexdigest()[:12]
-          
+
               all_tracked = sorted(previously_created | set(created) | set(overridden))
               files_block = "\n    ".join(f'"{p}"' for p in all_tracked) if all_tracked else '"(none)"'
               now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-          
+
               manifest_content = (
                   "@CONFIG(\n"
                   f'  version    -> "1.0.0"\n'
@@ -306,19 +322,19 @@ jobs:
                   f"    {files_block}\n"
                   ")\n"
               )
-          
+
               with open(".mdix/.manifest.mdix", "w") as mf:
                   mf.write(manifest_content)
               print()
               print(f"  Manifest -> .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
-          
+
           print()
           print("=" * 48)
           print(f"  created   : {len(created)}")
           print(f"  overridden: {len(overridden)}")
           print(f"  skipped   : {len(skipped)}")
           print("=" * 48)
-          
+
           if dry_run:
               print()
               print("DRY RUN complete — re-run with dry_run=false to apply.")
