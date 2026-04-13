@@ -1,0 +1,32 @@
+@CONFIG(
+  version    -> "1.0.0"
+  generated  -> "2026-04-13T19:37:52Z"
+  features   -> "data"
+  debug_mode -> "off"
+)
+
+@DATA(
+  template      = ".mdix/project_structure/project_structure.mdix"
+  template_hash = "1243ab62a319"
+  last_run      = "2026-04-13T19:37:52Z"
+  new_this_run  = 15
+  overridden    = 0
+  skipped       = 1
+
+  created_files::
+    ".gitignore"
+    ".vscode/extensions.json"
+    ".vscode/settings.json"
+    "Cargo.toml"
+    "docs/architecture.md"
+    "docs/getting-started.md"
+    "scripts/build.sh"
+    "scripts/deploy.sh"
+    "src/core/lib.rs"
+    "src/core/mod.rs"
+    "src/core/util.rs"
+    "src/main.rs"
+    "src/models/mod.rs"
+    "tests/.gitkeep"
+    "tests/integration.rs"
+)
