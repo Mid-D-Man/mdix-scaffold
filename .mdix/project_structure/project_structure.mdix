@@ -42,13 +42,16 @@
   description  = "My project description"
   author       = "YourName"
 
+  // github.workflows:: entries require workflows:write on GITHUB_TOKEN.
+  // Comment the two lines below back in only after configuring a PAT
+  // with that scope. See README for instructions.
   hidden_dirs::
-    hidden("github")
+    // hidden("github")   // uncomment with github.workflows block below
     hidden("vscode")
 
-  github.workflows::
-    f("ci",      "yml")
-    f("release", "yml")
+  // github.workflows::
+  //   f("ci",      "yml")
+  //   f("release", "yml")
 
   vscode::
     fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
