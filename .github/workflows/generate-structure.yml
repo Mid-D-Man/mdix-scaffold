@@ -39,6 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # REQUIRED: This allows the action to create/update other workflow files
+      workflows: write 
 
     steps:
       - uses: actions/checkout@v4
