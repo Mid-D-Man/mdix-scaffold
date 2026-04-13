@@ -1,0 +1,58 @@
+Project Structure Snapshot
+==========================
+Repository : Mid-D-Man/mdix-scaffold
+Branch     : main
+Commit     : 5899029ccddf12367e45e858cfef84b789a544f9
+Generated  : 2026-04-13T20:07:57Z
+
+Directory Layout
+================
+  .
+  .git
+  .github
+  .github/workflows
+  .github/workflows/bootstrap.yml
+  .github/workflows/generate-structure.yml
+  .github/workflows/nuke-structure.yml
+  .github/workflows/update-project-structure.yml
+  .gitignore
+  .mdix
+  .mdix/project_structure
+  .mdix/project_structure/project_structure.mdix
+  .vscode
+  .vscode/extensions.json
+  .vscode/settings.json
+  Cargo.toml
+  README.md
+  docs
+  docs/architecture.md
+  docs/getting-started.md
+  others
+  others/ProjectStructure.txt
+  scripts
+  scripts/build.sh
+  scripts/deploy.sh
+  src
+  src/core
+  src/core/lib.rs
+  src/core/mod.rs
+  src/core/util.rs
+  src/main.rs
+  src/models
+  src/models/mod.rs
+  tests
+  tests/.gitkeep
+  tests/integration.rs
+
+DixScript Files (.mdix)
+=======================
+  .mdix
+  .mdix/.manifest.mdix
+  .mdix/project_structure/project_structure.mdix
+
+GitHub Workflows
+================
+  .github/workflows/bootstrap.yml
+  .github/workflows/generate-structure.yml
+  .github/workflows/nuke-structure.yml
+  .github/workflows/update-project-structure.yml
