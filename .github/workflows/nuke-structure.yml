@@ -64,110 +64,107 @@ jobs:
       - name: Remove generated files
         run: |
           python3 << 'PYEOF'
-import json, os, re
-
-with open("/tmp/structure.json") as fh:
-    data = json.load(fh)
-
-# ── Build hidden segment set ──────────────────────────────────────────────────
-hidden_set = set()
-i = 0
-while True:
-    key = f"hidden_dirs[{i}]"
-    if key not in data:
-        break
-    entry = data[key]
-    if isinstance(entry, dict) and "segment" in entry:
-        hidden_set.add(entry["segment"].strip())
-    i += 1
-
-RESERVED_PREFIXES = {"hidden_dirs"}
-
-def key_to_dir(dotted_key):
-    if dotted_key == "root":
-        return ""
-    parts = dotted_key.split(".")
-    fs_parts = []
-    for idx, part in enumerate(parts):
-        if idx == 0 and part in hidden_set:
-            fs_parts.append("." + part)
-        else:
-            fs_parts.append(part)
-    return "/".join(fs_parts)
-
-def assemble_filename(entry):
-    name = entry.get("name", "").strip()
-    ext  = entry.get("ext",  "").strip()
-    if not name:
-        return None
-    return f"{name}.{ext}" if ext else name
-
-entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
-dir_groups = {}
-
-for key, value in data.items():
-    m = entry_re.match(key)
-    if not m:
-        continue
-    if not isinstance(value, dict) or "name" not in value:
-        continue
-    dir_key = m.group(1)
-    if dir_key in RESERVED_PREFIXES:
-        continue
-    idx = int(m.group(2))
-    if dir_key not in dir_groups:
-        dir_groups[dir_key] = {}
-    dir_groups[dir_key][idx] = value
-
-removed = []
-missing = []
-print("=== Removing files ===\n")
-
-for dir_key in sorted(dir_groups.keys()):
-    items    = dir_groups[dir_key]
-    dir_path = key_to_dir(dir_key)
-    for idx in sorted(items.keys()):
-        filename = assemble_filename(items[idx])
-        if not filename:
-            continue
-        filepath = os.path.join(dir_path, filename) if dir_path else filename
-        if os.path.exists(filepath):
-            os.remove(filepath)
-            removed.append(filepath)
-            print(f"  DEL  {filepath}")
-        else:
-            missing.append(filepath)
-            print(f"  ---  {filepath}  (already absent)")
-
-# Remove empty directories deepest-first
-dirs_seen = set()
-for dir_key in dir_groups.keys():
-    dir_path = key_to_dir(dir_key)
-    if dir_path:
-        parts = dir_path.split("/")
-        for depth in range(len(parts), 0, -1):
-            dirs_seen.add("/".join(parts[:depth]))
-
-for dir_path in sorted(dirs_seen, reverse=True):
-    if os.path.isdir(dir_path) and not os.listdir(dir_path):
-        os.rmdir(dir_path)
-        print(f"  RMD  {dir_path}/")
-
-# Remove manifest and .mdix dir if empty
-manifest = ".mdix/.manifest.mdix"
-if os.path.exists(manifest):
-    os.remove(manifest)
-    print(f"  DEL  {manifest}")
-if os.path.isdir(".mdix") and not os.listdir(".mdix"):
-    os.rmdir(".mdix")
-    print("  RMD  .mdix/")
-
-print()
-print("=" * 48)
-print(f"  removed : {len(removed)}")
-print(f"  absent  : {len(missing)}")
-print("=" * 48)
-PYEOF
+          import json, os, re
+          
+          with open("/tmp/structure.json") as fh:
+              data = json.load(fh)
+          
+          hidden_set = set()
+          i = 0
+          while True:
+              key = f"hidden_dirs[{i}]"
+              if key not in data:
+                  break
+              entry = data[key]
+              if isinstance(entry, dict) and "segment" in entry:
+                  hidden_set.add(entry["segment"].strip())
+              i += 1
+          
+          RESERVED_PREFIXES = {"hidden_dirs"}
+          
+          def key_to_dir(dotted_key):
+              if dotted_key == "root":
+                  return ""
+              parts = dotted_key.split(".")
+              fs_parts = []
+              for idx, part in enumerate(parts):
+                  if idx == 0 and part in hidden_set:
+                      fs_parts.append("." + part)
+                  else:
+                      fs_parts.append(part)
+              return "/".join(fs_parts)
+          
+          def assemble_filename(entry):
+              name = entry.get("name", "").strip()
+              ext  = entry.get("ext",  "").strip()
+              if not name:
+                  return None
+              return f"{name}.{ext}" if ext else name
+          
+          entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
+          dir_groups = {}
+          
+          for key, value in data.items():
+              m = entry_re.match(key)
+              if not m:
+                  continue
+              if not isinstance(value, dict) or "name" not in value:
+                  continue
+              dir_key = m.group(1)
+              if dir_key in RESERVED_PREFIXES:
+                  continue
+              idx = int(m.group(2))
+              if dir_key not in dir_groups:
+                  dir_groups[dir_key] = {}
+              dir_groups[dir_key][idx] = value
+          
+          removed = []
+          missing = []
+          print("=== Removing files ===\n")
+          
+          for dir_key in sorted(dir_groups.keys()):
+              items    = dir_groups[dir_key]
+              dir_path = key_to_dir(dir_key)
+              for idx in sorted(items.keys()):
+                  filename = assemble_filename(items[idx])
+                  if not filename:
+                      continue
+                  filepath = os.path.join(dir_path, filename) if dir_path else filename
+                  if os.path.exists(filepath):
+                      os.remove(filepath)
+                      removed.append(filepath)
+                      print(f"  DEL  {filepath}")
+                  else:
+                      missing.append(filepath)
+                      print(f"  ---  {filepath}  (already absent)")
+          
+          dirs_seen = set()
+          for dir_key in dir_groups.keys():
+              dir_path = key_to_dir(dir_key)
+              if dir_path:
+                  parts = dir_path.split("/")
+                  for depth in range(len(parts), 0, -1):
+                      dirs_seen.add("/".join(parts[:depth]))
+          
+          for dir_path in sorted(dirs_seen, reverse=True):
+              if os.path.isdir(dir_path) and not os.listdir(dir_path):
+                  os.rmdir(dir_path)
+                  print(f"  RMD  {dir_path}/")
+          
+          manifest = ".mdix/.manifest.mdix"
+          if os.path.exists(manifest):
+              os.remove(manifest)
+              print(f"  DEL  {manifest}")
+          if os.path.isdir(".mdix") and not os.listdir(".mdix"):
+              os.rmdir(".mdix")
+              print("  RMD  .mdix/")
+          
+          print()
+          print("=" * 48)
+          print(f"  removed : {len(removed)}")
+          print(f"  absent  : {len(missing)}")
+          print("=" * 48)
+          PYEOF
 
       - name: Show git status
         run: git status --short || true
