@@ -39,11 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # REQUIRED: This allows the action to create/update other workflow files
-      workflows: write 
+      workflows: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
