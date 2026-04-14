@@ -2,28 +2,25 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : 220b18808406840d0658ba490dde03062e165a76
-Generated  : 2026-04-14T18:34:30Z
+Commit     : 82fab00b3139f759a078ae6f69dd8e28de83d14a
+Generated  : 2026-04-14T18:35:13Z
 
 Directory Layout
 ================
   .
-  .git
+  .gitignore
+  Cargo.toml
+  README.md
+  package.json
   .github
   .github/workflows
   .github/workflows/bootstrap.yml
   .github/workflows/generate-structure.yml
   .github/workflows/nuke-structure.yml
   .github/workflows/update-project-structure.yml
-  .gitignore
-  .mdix
-  .mdix/project_structure
-  .mdix/project_structure/project_structure.mdix
   .vscode
   .vscode/extensions.json
   .vscode/settings.json
-  Cargo.toml
-  README.md
   bin
   bin/mdix-scaffold.js
   docs
@@ -31,7 +28,6 @@ Directory Layout
   docs/getting-started.md
   others
   others/ProjectStructure.txt
-  package.json
   scripts
   scripts/build.sh
   scripts/deploy.sh
@@ -39,11 +35,11 @@ Directory Layout
   scripts/nuke_structure.py
   scripts/update_structure.py
   src
+  src/main.rs
   src/core
   src/core/lib.rs
   src/core/mod.rs
   src/core/util.rs
-  src/main.rs
   src/models
   src/models/mod.rs
   tests
@@ -52,7 +48,6 @@ Directory Layout
 
 DixScript Files (.mdix)
 =======================
-  .mdix
   .mdix/.manifest.mdix
   .mdix/project_structure/project_structure.mdix
 
