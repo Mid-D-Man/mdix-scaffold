@@ -2,69 +2,107 @@
 """
 Generate project structure from a .mdix template.
 
+New in v2 (stolen from structkit):
+  - File strategies: skip (default), overwrite, backup, rename
+  - Pre/post hooks: shell commands from pre_hooks:: / post_hooks:: in @DATA
+  - Diff preview: --diff shows unified diffs alongside --dry-run
+
 Usage (local):
   python3 scripts/generate_structure.py
-  python3 scripts/generate_structure.py --template .mdix/project_structure/project_structure.mdix
   python3 scripts/generate_structure.py --dry-run
-  python3 scripts/generate_structure.py --override-stubs
+  python3 scripts/generate_structure.py --dry-run --diff
+  python3 scripts/generate_structure.py --file-strategy backup --backup /tmp/bak
+  python3 scripts/generate_structure.py --override-stubs  (alias for --file-strategy overwrite)
 
-Usage (from GitHub Actions - env vars still respected for backward compat):
+Usage (GitHub Actions — env vars respected for backward compat):
   OVERRIDE_STUBS=false DRY_RUN=false python3 scripts/generate_structure.py
 """
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
+
 # ---------------------------------------------------------------------------
-# Argument parsing — accepts both CLI flags and env-var fallbacks so the
-# script works locally AND from GitHub Actions without changing the workflow.
+# Argument parsing
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    p = argparse.ArgumentParser(
         description="Generate project structure from a .mdix template."
     )
-    parser.add_argument(
+    p.add_argument(
         "--template", "-t",
         default=os.environ.get(
             "TEMPLATE_PATH",
             ".mdix/project_structure/project_structure.mdix",
         ),
-        help="Path to the .mdix template file (default: .mdix/project_structure/project_structure.mdix)",
+        help="Path to the .mdix template",
     )
-    parser.add_argument(
+    p.add_argument(
         "--override-stubs",
         action="store_true",
         default=os.environ.get("OVERRIDE_STUBS", "false").lower() == "true",
-        help="Overwrite existing stub files",
+        help="Overwrite all existing files (alias for --file-strategy overwrite)",
     )
-    parser.add_argument(
+    p.add_argument(
+        "--file-strategy",
+        choices=["skip", "overwrite", "backup", "rename"],
+        default=os.environ.get("FILE_STRATEGY", "skip"),
+        help=(
+            "How to handle existing files:\n"
+            "  skip      — leave them untouched (default, keeps scaffold idempotent)\n"
+            "  overwrite — replace with template content\n"
+            "  backup    — copy to --backup dir then overwrite\n"
+            "  rename    — rename with .timestamp suffix then write"
+        ),
+    )
+    p.add_argument(
+        "--backup",
+        default=os.environ.get("BACKUP_DIR"),
+        help="Backup directory used when --file-strategy=backup",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         default=os.environ.get("DRY_RUN", "false").lower() == "true",
         help="Preview actions without writing anything",
     )
-    parser.add_argument(
+    p.add_argument(
+        "--diff",
+        action="store_true",
+        default=False,
+        help="Show unified diffs for files that would change (pairs well with --dry-run)",
+    )
+    p.add_argument(
         "--structure-json",
         default=os.environ.get("STRUCTURE_JSON", "/tmp/structure.json"),
-        help="Path to the converted structure JSON (default: /tmp/structure.json)",
+        help="Path to converted structure JSON",
     )
-    parser.add_argument(
+    p.add_argument(
         "--manifest-json",
         default=os.environ.get("MANIFEST_JSON", "/tmp/manifest.json"),
-        help="Path to an existing manifest JSON, if any",
+        help="Path to existing manifest JSON, if any",
     )
-    return parser.parse_args()
+    args = p.parse_args()
+
+    # --override-stubs is a convenience alias
+    if args.override_stubs:
+        args.file_strategy = "overwrite"
+
+    return args
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Built-in stub content by extension
 # ---------------------------------------------------------------------------
 
 STUB_DEFAULTS = {
@@ -101,8 +139,14 @@ RESERVED_PREFIXES = {
     "delete_files",
     "rename_files",
     "update_files",
+    "pre_hooks",
+    "post_hooks",
 }
 
+
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
 
 def key_to_dir(dotted_key, hidden_set):
     if dotted_key == "root":
@@ -158,6 +202,21 @@ def collect_dir_groups(data):
     return dir_groups
 
 
+def collect_string_array(data, prefix):
+    """Collect string-valued array entries: pre_hooks[0], pre_hooks[1], etc."""
+    items = []
+    i = 0
+    while True:
+        key = f"{prefix}[{i}]"
+        if key not in data:
+            break
+        val = data[key]
+        if isinstance(val, str):
+            items.append(val)
+        i += 1
+    return items
+
+
 def load_manifest(manifest_json_path):
     previously_created = set()
     if os.path.exists(manifest_json_path):
@@ -172,11 +231,94 @@ def load_manifest(manifest_json_path):
     return previously_created
 
 
+# ---------------------------------------------------------------------------
+# Hook runner (stolen from structkit)
+# ---------------------------------------------------------------------------
+
+def run_hooks(hooks, hook_type="pre", dry_run=False):
+    """Run a list of shell commands. Returns True if all succeed."""
+    if not hooks:
+        return True
+    for cmd in hooks:
+        print(f"  [{hook_type}-hook] {cmd}")
+        if dry_run:
+            print(f"           (skipped — dry run)")
+            continue
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.stdout.strip():
+            print(f"           stdout: {result.stdout.strip()}")
+        if result.stderr.strip():
+            print(f"           stderr: {result.stderr.strip()}")
+        if result.returncode != 0:
+            print(
+                f"  ERROR: {hook_type}-hook failed (exit {result.returncode}): {cmd}",
+                file=sys.stderr,
+            )
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# File strategy handler (stolen from structkit)
+# ---------------------------------------------------------------------------
+
+def handle_existing_file(filepath, new_content, args):
+    """
+    Apply the configured file strategy to an existing file.
+    Returns (label, should_write).
+    """
+    strategy = args.file_strategy
+
+    if args.diff:
+        try:
+            with open(filepath) as f:
+                old_content = f.read()
+        except OSError:
+            old_content = ""
+        old_lines = old_content.splitlines(keepends=True)
+        new_lines  = new_content.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"a/{filepath}",
+            tofile=f"b/{filepath}",
+        ))
+        if diff:
+            print("".join(diff), end="")
+
+    if strategy == "skip":
+        return "skipped", False
+
+    if strategy == "backup":
+        if not args.backup:
+            print(
+                "  WARNING: --file-strategy=backup requires --backup <dir>; skipping",
+                file=sys.stderr,
+            )
+            return "skipped (no backup dir)", False
+        os.makedirs(args.backup, exist_ok=True)
+        backup_dest = os.path.join(args.backup, os.path.basename(filepath))
+        if not args.dry_run:
+            shutil.copy2(filepath, backup_dest)
+        return f"backed up → {backup_dest}", True
+
+    if strategy == "rename":
+        new_name = f"{filepath}.{int(time.time())}"
+        if not args.dry_run:
+            os.rename(filepath, new_name)
+        return f"renamed → {new_name}", True
+
+    # overwrite
+    return "overwritten", True
+
+
+# ---------------------------------------------------------------------------
+# Manifest writer
+# ---------------------------------------------------------------------------
+
 def write_manifest(
     template_path,
     previously_created,
-    created, overridden, updated, deleted, renamed,
-    skipped,
+    created, overridden, updated, deleted, renamed, skipped,
     dry_run,
 ):
     if dry_run:
@@ -241,7 +383,7 @@ def run(args):
         print(
             f"ERROR: Structure JSON not found at '{args.structure_json}'.\n"
             "Run 'mdix convert <template> --to json' first, or use the full\n"
-            "workflow which calls 'mdix validate' and 'mdix convert' before this script.",
+            "workflow / Node CLI which calls mdix before this script.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -249,11 +391,12 @@ def run(args):
     with open(args.structure_json) as fh:
         data = json.load(fh)
 
-    hidden_set       = resolve_hidden_set(data)
-    dir_groups       = collect_dir_groups(data)
+    hidden_set         = resolve_hidden_set(data)
+    dir_groups         = collect_dir_groups(data)
     previously_created = load_manifest(args.manifest_json)
-
-    project_name = data.get("project_name", "unknown-project")
+    pre_hooks          = collect_string_array(data, "pre_hooks")
+    post_hooks         = collect_string_array(data, "post_hooks")
+    project_name       = data.get("project_name", "unknown-project")
 
     if args.dry_run:
         print("=" * 56)
@@ -261,15 +404,31 @@ def run(args):
         print("=" * 56)
         print()
 
-    print(f"Project    : {project_name}")
-    print(f"Template   : {args.template}")
-    print(f"Hidden     : {hidden_set or '(none)'}")
-    print(f"Dry run    : {args.dry_run}")
-    print(f"Override   : {args.override_stubs}")
+    print(f"Project        : {project_name}")
+    print(f"Template       : {args.template}")
+    print(f"Hidden dirs    : {hidden_set or '(none)'}")
+    print(f"File strategy  : {args.file_strategy}")
+    print(f"Dry run        : {args.dry_run}")
+    print(f"Diff           : {args.diff}")
     if previously_created:
-        print(f"Manifest   : {len(previously_created)} previously tracked file(s)")
+        print(f"Manifest       : {len(previously_created)} previously tracked file(s)")
+    if pre_hooks:
+        print(f"Pre-hooks      : {len(pre_hooks)}")
+    if post_hooks:
+        print(f"Post-hooks     : {len(post_hooks)}")
     print()
     print(f"Template defines {len(dir_groups)} directory group(s)")
+
+    # ------------------------------------------------------------------
+    # Pre-hooks
+    # ------------------------------------------------------------------
+    if pre_hooks:
+        print()
+        print("=== Pre-hooks ===")
+        print()
+        if not run_hooks(pre_hooks, "pre", args.dry_run):
+            print("Aborting — pre-hook failed.", file=sys.stderr)
+            sys.exit(1)
 
     # ------------------------------------------------------------------
     # PASS 1 — Delete files / directories
@@ -283,23 +442,23 @@ def run(args):
             break
         entry = data[key]
         if isinstance(entry, dict) and "path" in entry:
-            path = entry["path"].strip()
-            if path:
+            p = entry["path"].strip()
+            if p:
                 if not header_shown:
                     print()
                     print("=== Deleting files / directories ===")
                     print()
                     header_shown = True
-                if os.path.exists(path):
+                if os.path.exists(p):
                     if not args.dry_run:
-                        if os.path.isdir(path):
-                            shutil.rmtree(path)
+                        if os.path.isdir(p):
+                            shutil.rmtree(p)
                         else:
-                            os.remove(path)
-                    deleted.append(path)
-                    print(f"  DEL  {path}")
+                            os.remove(p)
+                    deleted.append(p)
+                    print(f"  DEL  {p}")
                 else:
-                    print(f"  ---  {path}  (not found, skipped)")
+                    print(f"  ---  {p}  (not found, skipped)")
         i += 1
 
     # ------------------------------------------------------------------
@@ -365,20 +524,25 @@ def run(args):
             raw_content = entry.get("content", "")
 
             if raw_content == "":
-                raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
+                raw_content = STUB_DEFAULTS.get(ext_part, "").replace(
+                    "{name}", name_part
+                )
 
             filepath = os.path.join(dir_path, filename) if dir_path else filename
 
             if os.path.exists(filepath):
-                if args.override_stubs:
+                label, should_write = handle_existing_file(
+                    filepath, raw_content, args
+                )
+                if should_write:
                     if not args.dry_run:
                         with open(filepath, "w") as fh:
                             fh.write(raw_content)
                     overridden.append(filepath)
-                    print(f"  OVR  {filepath}")
+                    print(f"  OVR  {filepath}  ({label})")
                 else:
                     skipped.append(filepath)
-                    print(f"  ---  {filepath}  (exists, kept)")
+                    print(f"  ---  {filepath}  ({label})")
             else:
                 if not args.dry_run:
                     parent = os.path.dirname(filepath)
@@ -409,6 +573,19 @@ def run(args):
                     print("=== Updating file contents ===")
                     print()
                     header_shown = True
+
+                if args.diff and os.path.exists(file_path):
+                    with open(file_path) as f:
+                        old_content = f.read()
+                    diff = list(difflib.unified_diff(
+                        old_content.splitlines(keepends=True),
+                        new_content.splitlines(keepends=True),
+                        fromfile=f"a/{file_path}",
+                        tofile=f"b/{file_path}",
+                    ))
+                    if diff:
+                        print("".join(diff), end="")
+
                 existed_before = os.path.exists(file_path)
                 if not args.dry_run:
                     parent = os.path.dirname(file_path)
@@ -422,7 +599,17 @@ def run(args):
         i += 1
 
     # ------------------------------------------------------------------
-    # Write manifest + print summary
+    # Post-hooks
+    # ------------------------------------------------------------------
+    if post_hooks:
+        print()
+        print("=== Post-hooks ===")
+        print()
+        if not run_hooks(post_hooks, "post", args.dry_run):
+            print("WARNING: post-hook failed.", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # Manifest + summary
     # ------------------------------------------------------------------
     write_manifest(
         template_path=args.template,
@@ -438,12 +625,12 @@ def run(args):
 
     print()
     print("=" * 56)
-    print(f"  created   : {len(created)}")
-    print(f"  overridden: {len(overridden)}")
-    print(f"  skipped   : {len(skipped)}")
-    print(f"  deleted   : {len(deleted)}")
-    print(f"  renamed   : {len(renamed)}")
-    print(f"  updated   : {len(updated)}")
+    print(f"  created    : {len(created)}")
+    print(f"  overridden : {len(overridden)}")
+    print(f"  skipped    : {len(skipped)}")
+    print(f"  deleted    : {len(deleted)}")
+    print(f"  renamed    : {len(renamed)}")
+    print(f"  updated    : {len(updated)}")
     print("=" * 56)
 
     if args.dry_run:
