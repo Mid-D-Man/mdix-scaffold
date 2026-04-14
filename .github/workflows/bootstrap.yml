@@ -13,8 +13,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create .mdix directory
-        run: mkdir -p .mdix/project_structure
+      - name: Create directory structure
+        run: |
+          mkdir -p .mdix/project_structure
+          mkdir -p scripts
+          mkdir -p bin
 
       - name: Write starter template (skip if exists)
         run: |
@@ -28,66 +31,6 @@ jobs:
           // =============================================================================
           // PROJECT SCAFFOLD TEMPLATE  ·  DixScript v1.0.0
           // =============================================================================
-          //
-          // PURPOSE
-          //   Declaratively define the file/directory structure of your project.
-          //   Push a change to this file (or trigger the workflow manually) and the
-          //   generator creates every missing entry.  Existing files are NEVER
-          //   overwritten unless you pass override_stubs = true to the workflow.
-          //
-          // WORKFLOW INTEGRATION
-          //   • Auto-trigger : push anything under  .mdix/project_structure/**
-          //   • Manual       : Actions → "Generate project structure" → Run workflow
-          //   • Inputs       : template (path), override_stubs (bool), dry_run (bool)
-          //
-          // ── QUICKFUNCS REFERENCE ─────────────────────────────────────────────────────
-          //
-          //   ~f(name, ext)
-          //     Stub file — content from built-in extension defaults.
-          //     Example:  f("mod", "rs")  →  src/mod.rs
-          //
-          //   ~fc(name, ext, content)
-          //     File with explicit starting content.  Use \n for newlines.
-          //     Example:  fc("README", "md", "# My Project\n")
-          //
-          //   ~gitkeep()
-          //     Drops a .gitkeep to keep empty directories tracked in git.
-          //
-          //   ~hidden(segment)
-          //     Marks a top-level key segment as dot-prefixed on disk.
-          //     Example:  hidden("vscode")  →  vscode:: group maps to .vscode/
-          //
-          //   ~delete_file(path)
-          //     Deletes a file or directory (recursively) at path.
-          //     Runs before the create pass.  No-op if path doesn't exist.
-          //     Example:  delete_file("deprecated/old.rs")
-          //
-          //   ~rename(src, dst)
-          //     Renames a file or directory.  Creates dst parent dirs as needed.
-          //     Runs after deletes, before creates.
-          //     Example:  rename("src/old.rs", "src/new.rs")
-          //
-          //   ~update(path, content)
-          //     Always-overwrite a file's content.  Runs after renames.
-          //     Example:  update("src/main.rs", "fn main() {}\n")
-          //
-          // ── DIRECTORY GROUP SYNTAX ───────────────────────────────────────────────────
-          //
-          //   key::           → group of files in that directory
-          //   key.sub::       → subdirectory (dots become slashes)
-          //   root::          → repository root ./
-          //   hidden_dirs::   → segments that receive a leading dot on disk
-          //   delete_files::  → files/dirs to delete before generation
-          //   rename_files::  → rename operations (after deletes, before creates)
-          //   update_files::  → content overwrites (after renames)
-          //
-          // ── NOTE ON .github/workflows/ ───────────────────────────────────────────────
-          //
-          //   Writing workflow files requires the `workflows:write` OAuth scope which
-          //   GITHUB_TOKEN does not hold by default.  See the README for PAT setup.
-          //   The github.workflows:: block below is intentionally commented out.
-          //
-          // =============================================================================
 
           @CONFIG(
             version    -> "1.0.0"
@@ -98,7 +41,6 @@ jobs:
 
           @QUICKFUNCS(
 
-            // Stub file — content filled from built-in extension defaults.
             ~f<object>(name, ext) {
               return {
                 name    = name
@@ -107,7 +49,6 @@ jobs:
               }
             }
 
-            // File with explicit starting content.
             ~fc<object>(name, ext, content) {
               return {
                 name    = name
@@ -116,7 +57,6 @@ jobs:
               }
             }
 
-            // .gitkeep — keeps otherwise-empty directories tracked in git.
             ~gitkeep<object>() {
               return {
                 name    = ".gitkeep"
@@ -125,21 +65,18 @@ jobs:
               }
             }
 
-            // Marks a key segment as dot-prefixed on disk  (e.g. vscode → .vscode).
             ~hidden<object>(segment) {
               return {
                 segment = segment
               }
             }
 
-            // Schedules a file or directory for deletion before the create pass.
             ~delete_file<object>(path) {
               return {
                 path = path
               }
             }
 
-            // Schedules a rename / move (runs after deletes, before creates).
             ~rename<object>(src, dst) {
               return {
                 from_path = src
@@ -147,7 +84,6 @@ jobs:
               }
             }
 
-            // Always-overwrite a file's content (runs after renames).
             ~update<object>(path, content) {
               return {
                 path    = path
@@ -162,79 +98,36 @@ jobs:
             description  = "My project description"
             author       = "YourName"
 
-            // ── hidden_dirs ───────────────────────────────────────────────────────
-            // Segments listed here get a leading dot on disk.
-            // Add "github" here (and uncomment github.workflows:: below) only after
-            // configuring a PAT with workflows:write.  See README for details.
             hidden_dirs::
-              // hidden("github")   // ← uncomment with github.workflows:: below
               hidden("vscode")
 
-            // ── delete_files ──────────────────────────────────────────────────────
-            // Files and directories to remove before the create pass.
-            // Uncomment and edit as needed:
-            //
-            // delete_files::
-            //   delete_file("deprecated/old_module.rs")
-
-            // ── rename_files ──────────────────────────────────────────────────────
-            // Rename or move files and directories (runs after deletes).
-            // Uncomment and edit as needed:
-            //
-            // rename_files::
-            //   rename("src/old_name.rs", "src/new_name.rs")
-
-            // ── update_files ──────────────────────────────────────────────────────
-            // Always-overwrite file content (runs after renames).
-            // Uncomment and edit as needed:
-            //
-            // update_files::
-            //   update("src/main.rs", "fn main() {\n    println!(\"v2\");\n}\n")
-
-            // ── github.workflows (disabled) ───────────────────────────────────────
-            // Uncomment after configuring a PAT with workflows:write.
-            // Also add hidden("github") to hidden_dirs above.
-            //
-            // github.workflows::
-            //   f("ci",      "yml")
-            //   f("release", "yml")
-
-            // ── VS Code workspace ─────────────────────────────────────────────────
             vscode::
               fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
               fc("settings",   "json", "{\n}\n")
 
-            // ── Source root ───────────────────────────────────────────────────────
             src::
               fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
 
-            // ── Core library modules ──────────────────────────────────────────────
             src.core::
               f("mod",  "rs")
               f("lib",  "rs")
               f("util", "rs")
 
-            // ── Data models ───────────────────────────────────────────────────────
             src.models::
               f("mod", "rs")
 
-            // ── Tests ─────────────────────────────────────────────────────────────
             tests::
               f("integration", "rs")
               gitkeep()
 
-            // ── Documentation ─────────────────────────────────────────────────────
             docs::
               fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
               fc("architecture",    "md", "# Architecture\n\nDescribe the high-level architecture here.\n")
 
-            // ── Shell scripts ─────────────────────────────────────────────────────
             scripts::
               f("build",  "sh")
               f("deploy", "sh")
 
-            // ── Repository root files ─────────────────────────────────────────────
-            // "root" is a reserved key that maps to the repository root ./
             root::
               fc("README",    "md",  "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
               fc(".gitignore", "",   "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
@@ -257,9 +150,27 @@ jobs:
 
           ## Quickstart
 
+          ### Option A — Node CLI (local)
+
+```bash
+          # Install dependencies (none required — zero-dep package)
+          node bin/mdix-scaffold.js generate
+          node bin/mdix-scaffold.js generate --dry-run
+          node bin/mdix-scaffold.js nuke --confirm DELETE
+          node bin/mdix-scaffold.js snapshot
+```
+
+          ### Option B — GitHub Actions
+
           1. Edit `.mdix/project_structure/project_structure.mdix`
-          2. Run **Generate project structure** from the Actions tab
+          2. Push or run **Generate project structure** from the Actions tab
           3. Commit the result
+
+          ## Requirements
+
+          - **mdix CLI** — built from [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust)
+          - **Python 3** — for the generation scripts
+          - **Node.js ≥ 18** — for the local CLI wrapper
 
           ## Template operations
 
@@ -270,20 +181,30 @@ jobs:
           | Delete file/dir | `delete_file(path)` | Pass 1 — before creates |
           | Rename file/dir | `rename(src, dst)` | Pass 2 — after deletes |
           | Overwrite content | `update(path, content)` | Pass 4 — after creates |
-
-          ## Note on .github/workflows/ entries
-
-          Generating files inside `.github/workflows/` requires `workflows:write`
-          permission on the token used for checkout. GITHUB_TOKEN does not hold
-          this scope by default. Options:
-
-          - **Recommended**: keep `github.workflows::` entries out of your template.
-          - **Advanced**: create a PAT with `contents:write` + `workflows:write`,
-            store it as `secrets.WORKFLOW_RW_TOKEN`, and pass it to actions/checkout.
-
-          See the full documentation in this file for template syntax.
           EOF
           echo "Wrote README.md"
+
+      - name: Write package.json (skip if exists)
+        run: |
+          if [ -f package.json ]; then
+            echo "package.json already exists — skipping."
+            exit 0
+          fi
+          cat > package.json << 'EOF'
+          {
+            "name": "mdix-scaffold",
+            "version": "1.0.0",
+            "description": "Declarative project structure generator using DixScript .mdix files",
+            "bin": {
+              "mdix-scaffold": "./bin/mdix-scaffold.js"
+            },
+            "engines": {
+              "node": ">=18.0.0"
+            },
+            "license": "MIT"
+          }
+          EOF
+          echo "Wrote package.json"
 
       - name: Commit bootstrap files
         run: |
