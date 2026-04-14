@@ -1,22 +1,5 @@
 name: Update project structure
 
-# Optional workflow — adds a plain-text snapshot of the repo layout to
-# others/ProjectStructure.txt on every push. Useful for keeping tabs on
-# what actually exists vs what the .mdix template intends.
-#
-# Usage in your repo (caller):
-#
-#   jobs:
-#     update-structure:
-#       uses: Mid-D-Man/mdix-scaffold/.github/workflows/update-project-structure.yml@main
-#       permissions:
-#         contents: write
-#       with:
-#         output_file: 'others/ProjectStructure.txt'
-#
-# Or trigger it directly from the Actions tab if you've copied this file
-# into your own .github/workflows/.
-
 on:
   workflow_dispatch:
     inputs:
@@ -27,7 +10,7 @@ on:
   push:
     branches: [ main, master, develop ]
     paths-ignore:
-      - 'others/ProjectStructure.txt'   # don't re-trigger on its own commit
+      - 'others/ProjectStructure.txt'
   workflow_call:
     inputs:
       output_file:
@@ -52,202 +35,11 @@ jobs:
         env:
           OUTPUT_FILE: ${{ inputs.output_file || 'others/ProjectStructure.txt' }}
         run: |
-          mkdir -p "$(dirname "$OUTPUT_FILE")"
-
-          {
-            echo "Project Structure Snapshot"
-            echo "=========================="
-            echo "Repository : ${{ github.repository }}"
-            echo "Branch     : ${{ github.ref_name }}"
-            echo "Commit     : ${{ github.sha }}"
-            echo "Generated  : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            echo ""
-
-            # ── Rust workspace detection ──────────────────────────────────────
-            if [ -f Cargo.toml ] && grep -q '^\[workspace\]' Cargo.toml 2>/dev/null; then
-              echo "Rust Workspace Members"
-              echo "======================"
-              # Extract members from Cargo.toml via python (available on ubuntu runners)
-              python3 - << 'PYEOF'
-          import re, os
-
-          with open("Cargo.toml") as f:
-              text = f.read()
-
-          # Find members = [ ... ] block (handles multi-line)
-          m = re.search(r'members\s*=\s*\[(.*?)\]', text, re.DOTALL)
-          if m:
-              raw = m.group(1)
-              members = [s.strip().strip('"').strip("'") for s in raw.split(',') if s.strip().strip('"').strip("'")]
-              for member in members:
-                  status = "✓" if os.path.isdir(member) else "✗ (missing)"
-                  print(f"  {status} {member}/")
-          else:
-              print("  (no members array found)")
-          PYEOF
-              echo ""
-
-              echo "Source Files"
-              echo "============"
-              python3 - << 'PYEOF'
-          import re, os
-
-          with open("Cargo.toml") as f:
-              text = f.read()
-
-          m = re.search(r'members\s*=\s*\[(.*?)\]', text, re.DOTALL)
-          members = []
-          if m:
-              raw = m.group(1)
-              members = [s.strip().strip('"').strip("'") for s in raw.split(',') if s.strip().strip('"').strip("'")]
-
-          src_files = []
-          for member in members:
-              src_dir = os.path.join(member, "src")
-              if os.path.isdir(src_dir):
-                  for root, _, files in os.walk(src_dir):
-                      for f in sorted(files):
-                          if f.endswith(".rs"):
-                              src_files.append(os.path.join(root, f))
-
-          if src_files:
-              for f in sorted(src_files):
-                  print(f"  {f}")
-          else:
-              print("  (none found)")
-          PYEOF
-              echo ""
-
-              echo "Test Files"
-              echo "=========="
-              python3 - << 'PYEOF'
-          import re, os
-
-          with open("Cargo.toml") as f:
-              text = f.read()
-
-          m = re.search(r'members\s*=\s*\[(.*?)\]', text, re.DOTALL)
-          members = []
-          if m:
-              raw = m.group(1)
-              members = [s.strip().strip('"').strip("'") for s in raw.split(',') if s.strip().strip('"').strip("'")]
-
-          test_files = []
-          for member in members:
-              test_dir = os.path.join(member, "tests")
-              if os.path.isdir(test_dir):
-                  for root, _, files in os.walk(test_dir):
-                      for f in sorted(files):
-                          if f.endswith(".rs"):
-                              test_files.append(os.path.join(root, f))
-
-          print("  (none found)" if not test_files else "\n".join(f"  {f}" for f in sorted(test_files)))
-          PYEOF
-              echo ""
-
-              echo "Benchmark Files"
-              echo "==============="
-              python3 - << 'PYEOF'
-          import re, os
-
-          with open("Cargo.toml") as f:
-              text = f.read()
-
-          m = re.search(r'members\s*=\s*\[(.*?)\]', text, re.DOTALL)
-          members = []
-          if m:
-              raw = m.group(1)
-              members = [s.strip().strip('"').strip("'") for s in raw.split(',') if s.strip().strip('"').strip("'")]
-
-          bench_files = []
-          for member in members:
-              bench_dir = os.path.join(member, "benches")
-              if os.path.isdir(bench_dir):
-                  for root, _, files in os.walk(bench_dir):
-                      for f in sorted(files):
-                          if f.endswith(".rs"):
-                              bench_files.append(os.path.join(root, f))
-
-          print("  (none found)" if not bench_files else "\n".join(f"  {f}" for f in sorted(bench_files)))
-          PYEOF
-              echo ""
-
-              echo "File Count Summary"
-              echo "=================="
-              python3 - << 'PYEOF'
-          import re, os
-
-          with open("Cargo.toml") as f:
-              text = f.read()
-
-          m = re.search(r'members\s*=\s*\[(.*?)\]', text, re.DOTALL)
-          members = []
-          if m:
-              raw = m.group(1)
-              members = [s.strip().strip('"').strip("'") for s in raw.split(',') if s.strip().strip('"').strip("'")]
-
-          totals = {"src": 0, "tests": 0, "benches": 0}
-          per_member = {}
-
-          for member in members:
-              if not os.path.isdir(member):
-                  continue
-              counts = {"src": 0, "tests": 0, "benches": 0}
-              for category in counts:
-                  d = os.path.join(member, category)
-                  if os.path.isdir(d):
-                      for root, _, files in os.walk(d):
-                          counts[category] += sum(1 for f in files if f.endswith(".rs"))
-              per_member[member] = counts
-              for k in totals:
-                  totals[k] += counts[k]
-
-          print(f"  Source files    : {totals['src']}")
-          print(f"  Test files      : {totals['tests']}")
-          print(f"  Benchmark files : {totals['benches']}")
-          print(f"  Total           : {sum(totals.values())}")
-          print("")
-          print("  Per-member breakdown:")
-          for member, counts in per_member.items():
-              print(f"    {member}: src={counts['src']}  tests={counts['tests']}  benches={counts['benches']}")
-          PYEOF
-
-            else
-              # ── Generic fallback for non-Rust or non-workspace repos ──────────
-              echo "Directory Layout"
-              echo "================"
-              find . -not -path './.git/*' \
-                     -not -path './target/*' \
-                     -not -path './node_modules/*' \
-                     -not -path './.mdix/.manifest.mdix' \
-                     | sort \
-                     | sed 's|^\./||' \
-                     | sed 's|^|  |'
-              echo ""
-            fi
-
-            # ── Always included sections ──────────────────────────────────────
-            echo "DixScript Files (.mdix)"
-            echo "======================="
-            if find . -name "*.mdix" -not -path './.git/*' | grep -q .; then
-              find . -name "*.mdix" -not -path './.git/*' | sort | sed 's|^\./||' | sed 's|^|  |'
-            else
-              echo "  (none)"
-            fi
-            echo ""
-
-            echo "GitHub Workflows"
-            echo "================"
-            if [ -d .github/workflows ]; then
-              ls -1 .github/workflows/*.yml 2>/dev/null | sort | sed 's|^|  |' || echo "  (none)"
-            else
-              echo "  (none)"
-            fi
-
-          } > "$OUTPUT_FILE"
-
-          echo "=== Snapshot written to $OUTPUT_FILE ==="
-          cat "$OUTPUT_FILE"
+          python3 scripts/update_structure.py \
+            --output "$OUTPUT_FILE" \
+            --repo   "${{ github.repository }}" \
+            --branch "${{ github.ref_name }}" \
+            --commit "${{ github.sha }}"
 
       - name: Commit snapshot if changed
         env:
