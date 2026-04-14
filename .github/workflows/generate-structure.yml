@@ -122,7 +122,7 @@ jobs:
           TEMPLATE_PATH: ${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}
         run: |
           python3 << 'PYEOF'
-          import json, os, re, sys, hashlib
+          import json, os, re, sys, hashlib, shutil
           from datetime import datetime, timezone
 
           override_stubs = os.environ.get("OVERRIDE_STUBS", "false").lower() == "true"
@@ -130,14 +130,15 @@ jobs:
           template_path  = os.environ.get("TEMPLATE_PATH",  ".mdix/project_structure/project_structure.mdix")
 
           if dry_run:
-              print("=" * 48)
-              print("  DRY RUN — no files will be written")
-              print("=" * 48)
+              print("=" * 56)
+              print("  DRY RUN — no files will be written or deleted")
+              print("=" * 56)
               print()
 
           with open("/tmp/structure.json") as fh:
               data = json.load(fh)
 
+          # ── Resolve hidden-dir segments ───────────────────────────────────
           hidden_set = set()
           i = 0
           while True:
@@ -158,6 +159,7 @@ jobs:
           print(f"Override   : {override_stubs}")
           print()
 
+          # ── Load manifest (previous run tracking) ─────────────────────────
           previously_created = set()
           if os.path.exists("/tmp/manifest.json"):
               with open("/tmp/manifest.json") as fh:
@@ -171,6 +173,7 @@ jobs:
               print(f"Manifest   : {len(previously_created)} previously tracked file(s)")
               print()
 
+          # ── Helpers ───────────────────────────────────────────────────────
           def key_to_dir(dotted_key):
               if dotted_key == "root":
                   return ""
@@ -190,6 +193,7 @@ jobs:
                   return None
               return f"{name}.{ext}" if ext else name
 
+          # ── Built-in stub content by extension ────────────────────────────
           STUB_DEFAULTS = {
               "rs":     "// Auto-generated stub\n",
               "cs":     "// Auto-generated stub\n",
@@ -219,8 +223,15 @@ jobs:
               "css":    "/* Auto-generated stub */\n",
           }
 
-          RESERVED_PREFIXES = {"hidden_dirs"}
+          # ── Reserved group-array prefixes (never treated as dir groups) ───
+          RESERVED_PREFIXES = {
+              "hidden_dirs",
+              "delete_files",
+              "rename_files",
+              "update_files",
+          }
 
+          # ── Collect directory groups from template JSON ───────────────────
           entry_re   = re.compile(r'^(.+)\[(\d+)\]$')
           dir_groups = {}
 
@@ -239,13 +250,81 @@ jobs:
               dir_groups[dir_key][idx] = value
 
           print(f"Template defines {len(dir_groups)} directory group(s)")
-          print()
-          print("=== Processing ===")
-          print()
 
+          # ──────────────────────────────────────────────────────────────────
+          # PASS 1 — Delete files / directories
+          # Runs before creates so a rename-then-recreate pattern works cleanly.
+          # ──────────────────────────────────────────────────────────────────
+          deleted = []
+          section_header_printed = False
+          i = 0
+          while True:
+              key = f"delete_files[{i}]"
+              if key not in data:
+                  break
+              entry = data[key]
+              if isinstance(entry, dict) and "path" in entry:
+                  path = entry["path"].strip()
+                  if path:
+                      if not section_header_printed:
+                          print()
+                          print("=== Deleting files / directories ===")
+                          print()
+                          section_header_printed = True
+                      if os.path.exists(path):
+                          if not dry_run:
+                              if os.path.isdir(path):
+                                  shutil.rmtree(path)
+                              else:
+                                  os.remove(path)
+                          deleted.append(path)
+                          print(f"  DEL  {path}")
+                      else:
+                          print(f"  ---  {path}  (not found, skipped)")
+              i += 1
+
+          # ──────────────────────────────────────────────────────────────────
+          # PASS 2 — Rename files / directories
+          # ──────────────────────────────────────────────────────────────────
+          renamed = []          # list of (from_path, to_path)
+          section_header_printed = False
+          i = 0
+          while True:
+              key = f"rename_files[{i}]"
+              if key not in data:
+                  break
+              entry = data[key]
+              if isinstance(entry, dict) and "from_path" in entry and "to_path" in entry:
+                  from_path = entry["from_path"].strip()
+                  to_path   = entry["to_path"].strip()
+                  if from_path and to_path:
+                      if not section_header_printed:
+                          print()
+                          print("=== Renaming files / directories ===")
+                          print()
+                          section_header_printed = True
+                      if os.path.exists(from_path):
+                          if not dry_run:
+                              parent = os.path.dirname(to_path)
+                              if parent:
+                                  os.makedirs(parent, exist_ok=True)
+                              os.rename(from_path, to_path)
+                          renamed.append((from_path, to_path))
+                          print(f"  REN  {from_path} → {to_path}")
+                      else:
+                          print(f"  ---  {from_path}  (not found, skipped)")
+              i += 1
+
+          # ──────────────────────────────────────────────────────────────────
+          # PASS 3 — Create / skip / override scaffold files
+          # ──────────────────────────────────────────────────────────────────
           created    = []
           skipped    = []
           overridden = []
+
+          print()
+          print("=== Processing scaffold files ===")
+          print()
 
           for dir_key in sorted(dir_groups.keys()):
               items    = dir_groups[dir_key]
@@ -291,6 +370,45 @@ jobs:
                       created.append(filepath)
                       print(f"  NEW  {filepath}")
 
+          # ──────────────────────────────────────────────────────────────────
+          # PASS 4 — Update file contents (always-overwrite)
+          # ──────────────────────────────────────────────────────────────────
+          updated = []
+          section_header_printed = False
+          i = 0
+          while True:
+              key = f"update_files[{i}]"
+              if key not in data:
+                  break
+              entry = data[key]
+              if isinstance(entry, dict) and "path" in entry:
+                  file_path   = entry["path"].strip()
+                  new_content = entry.get("content", "")
+                  if file_path:
+                      if not section_header_printed:
+                          print()
+                          print("=== Updating file contents ===")
+                          print()
+                          section_header_printed = True
+                      existed_before = os.path.exists(file_path)
+                      if not dry_run:
+                          parent = os.path.dirname(file_path)
+                          if parent:
+                              os.makedirs(parent, exist_ok=True)
+                          with open(file_path, "w") as fh:
+                              fh.write(new_content)
+                      updated.append(file_path)
+                      label = "UPD" if existed_before else "NEW"
+                      print(f"  {label}  {file_path}")
+              i += 1
+
+          # ──────────────────────────────────────────────────────────────────
+          # Write manifest
+          # Starts from previously tracked set, applies all mutations:
+          #   + created, overridden, updated (new files)
+          #   - deleted
+          #   rename: old path → new path
+          # ──────────────────────────────────────────────────────────────────
           if not dry_run:
               os.makedirs(".mdix", exist_ok=True)
 
@@ -299,7 +417,13 @@ jobs:
                   with open(template_path, "rb") as tf:
                       template_hash = hashlib.sha256(tf.read()).hexdigest()[:12]
 
-              all_tracked = sorted(previously_created | set(created) | set(overridden))
+              all_tracked = previously_created | set(created) | set(overridden) | set(updated)
+              all_tracked -= set(deleted)
+              for from_p, to_p in renamed:
+                  all_tracked.discard(from_p)
+                  all_tracked.add(to_p)
+              all_tracked = sorted(all_tracked)
+
               files_block = "\n    ".join(f'"{p}"' for p in all_tracked) if all_tracked else '"(none)"'
               now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -317,6 +441,9 @@ jobs:
                   f'  new_this_run  = {len(created)}\n'
                   f'  overridden    = {len(overridden)}\n'
                   f'  skipped       = {len(skipped)}\n'
+                  f'  deleted       = {len(deleted)}\n'
+                  f'  renamed       = {len(renamed)}\n'
+                  f'  updated       = {len(updated)}\n'
                   "\n"
                   "  created_files::\n"
                   f"    {files_block}\n"
@@ -326,14 +453,17 @@ jobs:
               with open(".mdix/.manifest.mdix", "w") as mf:
                   mf.write(manifest_content)
               print()
-              print(f"  Manifest -> .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
+              print(f"  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
 
           print()
-          print("=" * 48)
+          print("=" * 56)
           print(f"  created   : {len(created)}")
           print(f"  overridden: {len(overridden)}")
           print(f"  skipped   : {len(skipped)}")
-          print("=" * 48)
+          print(f"  deleted   : {len(deleted)}")
+          print(f"  renamed   : {len(renamed)}")
+          print(f"  updated   : {len(updated)}")
+          print("=" * 56)
 
           if dry_run:
               print()
