@@ -13,207 +13,181 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create directory structure
+      - name: Bootstrap repo files
         run: |
-          mkdir -p .mdix/project_structure
-          mkdir -p scripts
-          mkdir -p bin
+          python3 << 'PYEOF'
+import os, json
 
-      - name: Write starter template (skip if exists)
-        run: |
-          TARGET=".mdix/project_structure/project_structure.mdix"
-          if [ -f "$TARGET" ]; then
-            echo "Template already exists at $TARGET — skipping write."
-            exit 0
-          fi
+def write_if_missing(path, content):
+    if os.path.exists(path):
+        print(f"  exists : {path}")
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"  wrote  : {path}")
 
-          cat > "$TARGET" << 'MDIXEOF'
-          // =============================================================================
-          // PROJECT SCAFFOLD TEMPLATE  ·  DixScript v1.0.0
-          // =============================================================================
+# ── Directories ───────────────────────────────────────────────────────────
+for d in [".mdix/project_structure", "scripts", "bin"]:
+    os.makedirs(d, exist_ok=True)
+    print(f"  mkdir  : {d}")
 
-          @CONFIG(
-            version    -> "1.0.0"
-            author     -> "YourName"
-            features   -> "quickfuncs,data"
-            debug_mode -> "off"
-          )
+# ── .mdix/project_structure/project_structure.mdix ───────────────────────
+TEMPLATE = r"""// PROJECT SCAFFOLD TEMPLATE · DixScript v1.0.0
+// Edit this file to define your project structure.
+// Push a change or run: Actions → Generate project structure
 
-          @QUICKFUNCS(
+@CONFIG(
+  version    -> "1.0.0"
+  author     -> "YourName"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
 
-            ~f<object>(name, ext) {
-              return {
-                name    = name
-                ext     = ext
-                content = ""
-              }
-            }
+@QUICKFUNCS(
 
-            ~fc<object>(name, ext, content) {
-              return {
-                name    = name
-                ext     = ext
-                content = content
-              }
-            }
+  ~f<object>(name, ext) {
+    return { name = name, ext = ext, content = "" }
+  }
 
-            ~gitkeep<object>() {
-              return {
-                name    = ".gitkeep"
-                ext     = ""
-                content = ""
-              }
-            }
+  ~fc<object>(name, ext, content) {
+    return { name = name, ext = ext, content = content }
+  }
 
-            ~hidden<object>(segment) {
-              return {
-                segment = segment
-              }
-            }
+  ~gitkeep<object>() {
+    return { name = ".gitkeep", ext = "", content = "" }
+  }
 
-            ~delete_file<object>(path) {
-              return {
-                path = path
-              }
-            }
+  ~hidden<object>(segment) {
+    return { segment = segment }
+  }
 
-            ~rename<object>(src, dst) {
-              return {
-                from_path = src
-                to_path   = dst
-              }
-            }
+  ~delete_file<object>(path) {
+    return { path = path }
+  }
 
-            ~update<object>(path, content) {
-              return {
-                path    = path
-                content = content
-              }
-            }
+  ~rename<object>(src, dst) {
+    return { from_path = src, to_path = dst }
+  }
 
-          )
+  ~update<object>(path, content) {
+    return { path = path, content = content }
+  }
 
-          @DATA(
-            project_name = "my-project"
-            description  = "My project description"
-            author       = "YourName"
+)
 
-            hidden_dirs::
-              hidden("vscode")
+@DATA(
+  project_name = "my-project"
+  description  = "My project description"
+  author       = "YourName"
 
-            vscode::
-              fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
-              fc("settings",   "json", "{\n}\n")
+  // Segments listed here get a leading dot on disk (.vscode, .github, etc.)
+  hidden_dirs::
+    hidden("vscode")
 
-            src::
-              fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
+  // ── VS Code ──────────────────────────────────────────────────────────
+  vscode::
+    fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
+    fc("settings",   "json", "{\n}\n")
 
-            src.core::
-              f("mod",  "rs")
-              f("lib",  "rs")
-              f("util", "rs")
+  // ── Source ───────────────────────────────────────────────────────────
+  src::
+    fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
 
-            src.models::
-              f("mod", "rs")
+  src.core::
+    f("mod",  "rs")
+    f("lib",  "rs")
+    f("util", "rs")
 
-            tests::
-              f("integration", "rs")
-              gitkeep()
+  src.models::
+    f("mod", "rs")
 
-            docs::
-              fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
-              fc("architecture",    "md", "# Architecture\n\nDescribe the high-level architecture here.\n")
+  // ── Tests ────────────────────────────────────────────────────────────
+  tests::
+    f("integration", "rs")
+    gitkeep()
 
-            scripts::
-              f("build",  "sh")
-              f("deploy", "sh")
+  // ── Docs ─────────────────────────────────────────────────────────────
+  docs::
+    fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
+    fc("architecture",    "md", "# Architecture\n\nDescribe the high-level design here.\n")
 
-            root::
-              fc("README",    "md",  "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
-              fc(".gitignore", "",   "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
-              fc("Cargo",     "toml","[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
-          )
-          MDIXEOF
+  // ── Scripts ──────────────────────────────────────────────────────────
+  scripts::
+    f("build",  "sh")
+    f("deploy", "sh")
 
-          echo "Wrote starter template to $TARGET"
+  // ── Root files ───────────────────────────────────────────────────────
+  root::
+    fc("README",     "md",   "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
+    fc(".gitignore", "",     "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
+    fc("Cargo",      "toml", "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+)
+"""
+write_if_missing(".mdix/project_structure/project_structure.mdix", TEMPLATE)
 
-      - name: Write README.md (skip if exists)
-        run: |
-          if [ -f README.md ]; then
-            echo "README.md already exists — skipping."
-            exit 0
-          fi
-          cat > README.md << 'EOF'
-          # mdix-scaffold
+# ── package.json ──────────────────────────────────────────────────────────
+PKG = json.dumps({
+    "name": "mdix-scaffold",
+    "version": "1.0.0",
+    "description": "Declarative project structure generator using DixScript .mdix files",
+    "keywords": ["scaffold", "project-structure", "dixscript", "mdix", "codegen"],
+    "homepage": "https://github.com/Mid-D-Man/mdix-scaffold",
+    "repository": {"type": "git", "url": "https://github.com/Mid-D-Man/mdix-scaffold.git"},
+    "license": "MIT",
+    "bin": {"mdix-scaffold": "./bin/mdix-scaffold.js"},
+    "scripts": {
+        "generate":          "node bin/mdix-scaffold.js generate",
+        "generate:dry":      "node bin/mdix-scaffold.js generate --dry-run",
+        "generate:diff":     "node bin/mdix-scaffold.js generate --dry-run --diff",
+        "generate:override": "node bin/mdix-scaffold.js generate --override-stubs",
+        "nuke":              "node bin/mdix-scaffold.js nuke --confirm DELETE",
+        "snapshot":          "node bin/mdix-scaffold.js snapshot",
+        "validate":          "node bin/mdix-scaffold.js validate",
+        "templates":         "node bin/mdix-scaffold.js templates",
+        "test":              "node bin/mdix-scaffold.js --help"
+    },
+    "engines": {"node": ">=18.0.0"},
+    "dependencies": {}
+}, indent=2) + "\n"
+write_if_missing("package.json", PKG)
 
-          Declarative project structure generator using DixScript `.mdix` files.
+# ── .gitignore ────────────────────────────────────────────────────────────
+write_if_missing(".gitignore",
+    "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\nnode_modules/\n")
 
-          ## Quickstart
+# ── README.md ─────────────────────────────────────────────────────────────
+README = """\
+# mdix-scaffold
 
-          ### Option A — Node CLI (local)
+Declarative, idempotent project structure generator using
+[DixScript](https://github.com/Mid-D-Man/DixScript-Rust) `.mdix` files.
+
+## Quickstart
+
+### Local (Node CLI)
 
 ```bash
-          # Install dependencies (none required — zero-dep package)
-          node bin/mdix-scaffold.js generate
-          node bin/mdix-scaffold.js generate --dry-run
-          node bin/mdix-scaffold.js nuke --confirm DELETE
-          node bin/mdix-scaffold.js snapshot
+# Requires: mdix CLI on PATH + Python 3 + Node >= 18
+npm run generate           # generate project structure
+npm run generate:dry       # preview without writing
+npm run generate:diff      # preview with unified diffs
+npm run generate:override  # overwrite existing stubs
+npm run nuke               # remove all generated files
+npm run snapshot           # update others/ProjectStructure.txt
+npm run templates          # list available project templates
 ```
 
-          ### Option B — GitHub Actions
+### GitHub Actions
 
-          1. Edit `.mdix/project_structure/project_structure.mdix`
-          2. Push or run **Generate project structure** from the Actions tab
-          3. Commit the result
+1. Edit `.mdix/project_structure/project_structure.mdix`
+2. Push, or run **Actions → Generate project structure**
+3. Done — generated files appear in a new commit
 
-          ## Requirements
+## Requirements
 
-          - **mdix CLI** — built from [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust)
-          - **Python 3** — for the generation scripts
-          - **Node.js ≥ 18** — for the local CLI wrapper
+- **mdix CLI** — build from [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust)
+- **Python 3** — for the generation scripts
+- **Node.js ≥ 18** — for the local CLI wrapper
 
-          ## Template operations
-
-          | Operation | Syntax | When it runs |
-          |---|---|---|
-          | Create stub | `f(name, ext)` | Pass 3 — create |
-          | Create with content | `fc(name, ext, content)` | Pass 3 — create |
-          | Delete file/dir | `delete_file(path)` | Pass 1 — before creates |
-          | Rename file/dir | `rename(src, dst)` | Pass 2 — after deletes |
-          | Overwrite content | `update(path, content)` | Pass 4 — after creates |
-          EOF
-          echo "Wrote README.md"
-
-      - name: Write package.json (skip if exists)
-        run: |
-          if [ -f package.json ]; then
-            echo "package.json already exists — skipping."
-            exit 0
-          fi
-          cat > package.json << 'EOF'
-          {
-            "name": "mdix-scaffold",
-            "version": "1.0.0",
-            "description": "Declarative project structure generator using DixScript .mdix files",
-            "bin": {
-              "mdix-scaffold": "./bin/mdix-scaffold.js"
-            },
-            "engines": {
-              "node": ">=18.0.0"
-            },
-            "license": "MIT"
-          }
-          EOF
-          echo "Wrote package.json"
-
-      - name: Commit bootstrap files
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          if git diff --staged --quiet; then
-            echo "Nothing to commit — already bootstrapped."
-          else
-            git commit -m "chore: bootstrap scaffold repo [skip ci]"
-            git push
-          fi
+## `.mdix/` layout
