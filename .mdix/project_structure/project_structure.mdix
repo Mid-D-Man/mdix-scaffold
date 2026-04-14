@@ -1,3 +1,86 @@
+// =============================================================================
+// PROJECT SCAFFOLD TEMPLATE  ·  DixScript v1.0.0 - side note removing these comments  makes the compiler compile just a tiny bit faster
+// =============================================================================
+//
+// PURPOSE
+//   Declaratively define the file/directory structure of your project.
+//   Push a change to this file (or trigger the workflow manually) and the
+//   generator creates every missing entry. Existing files are NEVER
+//   overwritten unless you pass override_stubs = true.
+//
+// WORKFLOW INTEGRATION
+//   • Auto-trigger : push anything under  .mdix/project_structure/**
+//   • Manual       : Actions → "Generate project structure" → Run workflow
+//   • Inputs       : template (path), override_stubs (bool), dry_run (bool)
+//
+// ── QUICKFUNCS REFERENCE ─────────────────────────────────────────────────────
+//
+//   ~f(name, ext)
+//     Stub file — content comes from built-in extension defaults.
+//     "rs" → "// Auto-generated stub\n"   "sh" → "#!/usr/bin/env bash\n…"
+//     Example:  f("mod", "rs")   creates  src/mod.rs
+//
+//   ~fc(name, ext, content)
+//     File with explicit starting content.
+//     Use \n for newlines and \" for embedded quotes.
+//     Example:  fc("README", "md", "# My Project\n")
+//
+//   ~gitkeep()
+//     Drops a .gitkeep so an otherwise empty directory survives git.
+//     Example:  gitkeep()   creates  tests/.gitkeep
+//
+//   ~hidden(segment)
+//     Marks a top-level key segment as dot-prefixed on disk.
+//     Example:  hidden("vscode") → the `vscode::` group maps to .vscode/
+//
+//   ~delete_file(path)
+//     Deletes a file or directory (recursively) at the given repo-relative
+//     path.  Runs BEFORE any file creation in the same workflow run.
+//     No-op when the path does not exist.
+//     Example:  delete_file("deprecated/old_module.rs")
+//
+//   ~rename(src, dst)
+//     Renames a file or directory.  Parent directories of dst are created
+//     automatically.  No-op when src does not exist.
+//     Example:  rename("src/old.rs", "src/new.rs")
+//
+//   ~update(path, content)
+//     Always overwrites the file at path with new content (creates it if
+//     absent).  Unlike fc(), this is NOT idempotent — it runs every time.
+//     Example:  update("src/main.rs", "fn main() {}\n")
+//
+// ── DIRECTORY GROUP SYNTAX ───────────────────────────────────────────────────
+//
+//   key::           double-colon — group of files living in that directory
+//   key.sub::       dotted key   — subdirectory (dots → slashes on disk)
+//   root::          reserved     — maps to the repository root ./
+//   hidden_dirs::   special      — segments listed here get a leading dot
+//   delete_files::  special      — files/dirs to delete before generation
+//   rename_files::  special      — rename operations applied after deletes
+//   update_files::  special      — content overwrites applied after renames
+//
+// ── PATH RESOLUTION EXAMPLES ─────────────────────────────────────────────────
+//
+//   Template key             Disk path              Reason
+//   ──────────────────────   ─────────────────────  ───────────────────────
+//   root                     ./                     reserved keyword
+//   src                      src/                   plain segment
+//   src.core                 src/core/              dots → slashes
+//   vscode  (+ hidden)       .vscode/               listed in hidden_dirs
+//   github.workflows (hidden) .github/workflows/    "github" in hidden_dirs
+//
+// ── NOTE ON .github/workflows/ ───────────────────────────────────────────────
+//
+//   Writing into .github/workflows/ requires the OAuth `workflows:write`
+//   scope, which GITHUB_TOKEN does NOT hold by default.
+//   To enable it:
+//     1. Create a fine-grained PAT with  contents:write + workflows:write
+//     2. Store it as secret  WORKFLOW_RW_TOKEN
+//     3. In the checkout step add:  token: ${{ secrets.WORKFLOW_RW_TOKEN }}
+//     4. Uncomment the hidden("github") line and github.workflows:: block below
+//
+// =============================================================================
+
 @CONFIG(
   version    -> "1.0.0"
   author     -> "YourName"
@@ -6,6 +89,8 @@
 )
 
 @QUICKFUNCS(
+
+  // Creates a stub file whose content is filled from built-in extension defaults.
   ~f<object>(name, ext) {
     return {
       name    = name
@@ -14,6 +99,7 @@
     }
   }
 
+  // Creates a file with explicit starting content.
   ~fc<object>(name, ext, content) {
     return {
       name    = name
@@ -22,6 +108,7 @@
     }
   }
 
+  // Drops a .gitkeep so git tracks the otherwise-empty directory.
   ~gitkeep<object>() {
     return {
       name    = ".gitkeep"
@@ -30,11 +117,39 @@
     }
   }
 
+  // Marks a key segment as dot-prefixed on disk  (e.g. vscode → .vscode).
   ~hidden<object>(segment) {
     return {
       segment = segment
     }
   }
+
+  // Schedules a file or directory for deletion before the create pass.
+  // Directories are removed recursively.
+  ~delete_file<object>(path) {
+    return {
+      path = path
+    }
+  }
+
+  // Schedules a rename / move operation (runs after deletes, before creates).
+  // Parent directories of dst are created automatically when needed.
+  ~rename<object>(src, dst) {
+    return {
+      from_path = src
+      to_path   = dst
+    }
+  }
+
+  // Schedules a content-overwrite (runs after renames, before the summary).
+  // Always writes — use sparingly on files you want the scaffold to manage.
+  ~update<object>(path, content) {
+    return {
+      path    = path
+      content = content
+    }
+  }
+
 )
 
 @DATA(
@@ -42,44 +157,85 @@
   description  = "My project description"
   author       = "YourName"
 
-  // github.workflows:: entries require workflows:write on GITHUB_TOKEN.
-  // Comment the two lines below back in only after configuring a PAT
-  // with that scope. See README for instructions.
+  // ── hidden_dirs ─────────────────────────────────────────────────────────
+  // Segments listed here receive a leading dot when mapped to disk.
+  // Add "github" here (and uncomment the github.workflows block below) once
+  // you have configured a PAT with the workflows:write scope.
   hidden_dirs::
-    // hidden("github")   // uncomment with github.workflows block below
+    // hidden("github")   // ← uncomment together with github.workflows:: below
     hidden("vscode")
 
-  // github.workflows::
-  //   f("ci",      "yml")
-  //   f("release", "yml")
+  // ── delete_files ────────────────────────────────────────────────────────
+  // Files and directories to remove before the create pass.
+  // Paths are relative to the repository root.  No-op if already absent.
+  // Uncomment and edit as needed:
+  //
+  // delete_files::
+  //   delete_file("deprecated/old_module.rs")
+  //   delete_file("scripts/old_build.sh")
 
+  // ── rename_files ────────────────────────────────────────────────────────
+  // Rename or move files and directories (applied after deletes).
+  // Uncomment and edit as needed:
+  //
+  // rename_files::
+  //   rename("src/old_name.rs",    "src/new_name.rs")
+  //   rename("docs/old-guide.md",  "docs/new-guide.md")
+
+  // ── update_files ────────────────────────────────────────────────────────
+  // Always-overwrite file content (applied after renames).
+  // Use \n for newlines and \" for embedded quotes.
+  // Uncomment and edit as needed:
+  //
+  // update_files::
+  //   update("src/main.rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
+
+  // ── .vscode ──────────────────────────────────────────────────────────────
+  // VS Code workspace settings and extension recommendations.
+  // "vscode" is listed in hidden_dirs above, so this maps to .vscode/
   vscode::
     fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
     fc("settings",   "json", "{\n}\n")
 
+  // ── GitHub Actions (disabled by default) ─────────────────────────────────
+  // Uncomment after configuring a PAT with workflows:write. See note above.
+  // "github" must also be added to hidden_dirs for .github/ to resolve.
+  //
+  // github.workflows::
+  //   f("ci",      "yml")
+  //   f("release", "yml")
+
+  // ── Source root ───────────────────────────────────────────────────────────
   src::
     fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
 
+  // ── Core library modules ──────────────────────────────────────────────────
   src.core::
     f("mod",  "rs")
     f("lib",  "rs")
     f("util", "rs")
 
+  // ── Data models ───────────────────────────────────────────────────────────
   src.models::
     f("mod", "rs")
 
+  // ── Integration tests ─────────────────────────────────────────────────────
   tests::
     f("integration", "rs")
     gitkeep()
 
+  // ── Documentation ─────────────────────────────────────────────────────────
   docs::
     fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
     fc("architecture",    "md", "# Architecture\n\nDescribe the high-level architecture here.\n")
 
+  // ── Shell scripts ─────────────────────────────────────────────────────────
   scripts::
     f("build",  "sh")
     f("deploy", "sh")
 
+  // ── Repository root files ─────────────────────────────────────────────────
+  // The special key "root" maps to ./ (the repository root).
   root::
     fc("README",    "md",  "# my-project\n\nMy project description.\n\n## Usage\n\nAdd usage instructions here.\n")
     fc(".gitignore", "",   "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
