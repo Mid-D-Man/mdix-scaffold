@@ -2,8 +2,8 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : a59d8180b748f1a694e0b37d56640b43750d716c
-Generated  : 2026-04-14T18:31:06Z
+Commit     : 9c8baa06368cc0636a4902fb5e7f73024a22b52e
+Generated  : 2026-04-14T18:31:57Z
 
 Directory Layout
 ================
@@ -24,6 +24,8 @@ Directory Layout
   .vscode/settings.json
   Cargo.toml
   README.md
+  bin
+  bin/mdix-scaffold.js
   docs
   docs/architecture.md
   docs/getting-started.md
