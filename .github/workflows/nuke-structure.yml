@@ -55,19 +55,35 @@ jobs:
       - name: Install mdix to PATH
         run: sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
 
+      - name: Resolve nuke script
+        id: script
+        run: |
+          if [ -f "scripts/nuke_structure.py" ]; then
+            echo "path=scripts/nuke_structure.py" >> "$GITHUB_OUTPUT"
+            echo "Using local script."
+          else
+            echo "Local script not found — fetching from mdix-scaffold..."
+            curl -fsSL \
+              "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/nuke_structure.py" \
+              -o /tmp/nuke_structure.py
+            echo "path=/tmp/nuke_structure.py" >> "$GITHUB_OUTPUT"
+            echo "Using fetched script."
+          fi
+
       - name: Validate and convert template
         run: |
-          TEMPLATE="${{ github.event.inputs.template }}"
-          mdix validate "$TEMPLATE"
-          mdix convert "$TEMPLATE" --to json -o /tmp/structure.json
+          TMPL="${{ github.event.inputs.template }}"
+          mdix validate "$TMPL"
+          mdix convert "$TMPL" --to json -o /tmp/structure.json
 
       - name: Remove generated files
         env:
           STRUCTURE_JSON: /tmp/structure.json
         run: |
-          python3 scripts/nuke_structure.py \
+          python3 ${{ steps.script.outputs.path }} \
             --confirm DELETE \
-            --template "${{ github.event.inputs.template }}"
+            --template "${{ github.event.inputs.template }}" \
+            --structure-json /tmp/structure.json
 
       - name: Show git status
         run: git status --short || true
