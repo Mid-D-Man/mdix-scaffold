@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * mdix-scaffold CLI
+ * mdix-scaffold CLI — local wrapper around scripts/ Python modules.
  *
- * A thin Node.js wrapper around the Python scripts in scripts/.
- * Requires:
- *   - Python 3 available as `python3` (or `python` on Windows)
- *   - The mdix CLI on PATH (built from DixScript-Rust)
+ * Requirements:
+ *   - Python 3  (python3 or python)
+ *   - mdix CLI on PATH (built from DixScript-Rust)
+ *   - Node.js >= 18
  *
  * Usage:
  *   mdix-scaffold generate [options]
@@ -13,46 +13,38 @@
  *   mdix-scaffold snapshot [options]
  *   mdix-scaffold validate [template]
  *   mdix-scaffold convert  [template]
- *
- * Examples:
- *   mdix-scaffold generate
- *   mdix-scaffold generate --dry-run
- *   mdix-scaffold generate --override-stubs --template path/to/template.mdix
- *   mdix-scaffold nuke --confirm DELETE
- *   mdix-scaffold snapshot --output others/ProjectStructure.txt
- *   mdix-scaffold validate
- *   mdix-scaffold convert
+ *   mdix-scaffold templates
  */
 
 "use strict";
 
 const { spawnSync } = require("child_process");
 const path = require("path");
-const fs = require("fs");
+const fs   = require("fs");
 
 // ---------------------------------------------------------------------------
-// Resolve paths
+// Paths
 // ---------------------------------------------------------------------------
 
-const PKG_ROOT     = path.resolve(__dirname, "..");
-const SCRIPTS_DIR  = path.join(PKG_ROOT, "scripts");
+const PKG_ROOT    = path.resolve(__dirname, "..");
+const SCRIPTS_DIR = path.join(PKG_ROOT, "scripts");
 
-const DEFAULT_TEMPLATE =
-  ".mdix/project_structure/project_structure.mdix";
+const DEFAULT_TEMPLATE = ".mdix/project_structure/project_structure.mdix";
 const DEFAULT_JSON_OUT = "/tmp/mdix_structure.json";
+const DEFAULT_MANIFEST = "/tmp/mdix_manifest.json";
 
 // ---------------------------------------------------------------------------
-// Detect python binary
+// Detect Python
 // ---------------------------------------------------------------------------
 
 function findPython() {
   for (const candidate of ["python3", "python"]) {
-    const result = spawnSync(candidate, ["--version"], { encoding: "utf8" });
-    if (result.status === 0) return candidate;
+    const r = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+    if (r.status === 0) return candidate;
   }
   console.error(
-    "ERROR: Python 3 is required but was not found on PATH.\n" +
-    "Install Python 3 and ensure it is accessible as 'python3' or 'python'."
+    "ERROR: Python 3 not found.\n" +
+    "Install Python 3 and ensure it is on PATH as 'python3' or 'python'."
   );
   process.exit(1);
 }
@@ -62,13 +54,12 @@ function findPython() {
 // ---------------------------------------------------------------------------
 
 function findMdix() {
-  const result = spawnSync("mdix", ["--version"], { encoding: "utf8" });
-  if (result.status === 0) return "mdix";
-  // Not on PATH — check if there's a local build
-  const localBin = path.join(PKG_ROOT, "bin", "mdix");
-  if (fs.existsSync(localBin)) return localBin;
+  const r = spawnSync("mdix", ["--version"], { encoding: "utf8" });
+  if (r.status === 0) return "mdix";
+  const local = path.join(PKG_ROOT, "bin", "mdix");
+  if (fs.existsSync(local)) return local;
   console.error(
-    "ERROR: The 'mdix' CLI was not found on PATH.\n" +
+    "ERROR: 'mdix' CLI not found on PATH.\n" +
     "Build it from source:\n" +
     "  git clone https://github.com/Mid-D-Man/DixScript-Rust.git\n" +
     "  cd DixScript-Rust && cargo build -p mdix-cli --release\n" +
@@ -78,66 +69,60 @@ function findMdix() {
 }
 
 // ---------------------------------------------------------------------------
-// Run a subprocess, streaming output, exit on failure
+// Run helpers
 // ---------------------------------------------------------------------------
 
 function run(bin, args, opts = {}) {
-  const result = spawnSync(bin, args, {
+  const r = spawnSync(bin, args, {
     stdio: "inherit",
     encoding: "utf8",
     cwd: opts.cwd || process.cwd(),
-    env: { ...process.env, ...opts.env },
+    env: { ...process.env, ...(opts.env || {}) },
   });
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
+  if (r.status !== 0) process.exit(r.status ?? 1);
 }
 
 function runPy(script, args, opts = {}) {
   const python = findPython();
-  const scriptPath = path.join(SCRIPTS_DIR, script);
-  if (!fs.existsSync(scriptPath)) {
-    console.error(`ERROR: Script not found: ${scriptPath}`);
+  const p = path.join(SCRIPTS_DIR, script);
+  if (!fs.existsSync(p)) {
+    console.error(`ERROR: Script not found: ${p}`);
     process.exit(1);
   }
-  run(python, [scriptPath, ...args], opts);
+  run(python, [p, ...args], opts);
 }
 
 // ---------------------------------------------------------------------------
-// Parse minimal CLI args (we keep this dependency-free)
+// Minimal arg parser (zero dependencies)
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = argv.slice(2); // drop node + script name
+  const args = argv.slice(2);
   const cmd  = args[0];
   const rest = args.slice(1);
 
-  const flags = {};
+  const flags      = {};
   const positional = [];
 
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (a === "--dry-run")         { flags.dryRun = true; }
-    else if (a === "--override-stubs") { flags.overrideStubs = true; }
-    else if (a === "--template" || a === "-t") {
-      flags.template = rest[++i];
-    }
-    else if (a === "--output" || a === "-o") {
-      flags.output = rest[++i];
-    }
-    else if (a === "--confirm") {
-      flags.confirm = rest[++i];
-    }
-    else if (a === "--json") {
-      flags.json = rest[++i];
-    }
-    else if (a === "--repo")   { flags.repo   = rest[++i]; }
-    else if (a === "--branch") { flags.branch = rest[++i]; }
-    else if (a === "--commit") { flags.commit = rest[++i]; }
-    else if (a === "--help" || a === "-h") { flags.help = true; }
-    else if (a === "--version" || a === "-v") { flags.version = true; }
-    else if (!a.startsWith("-")) {
-      positional.push(a);
+    switch (a) {
+      case "--dry-run":          flags.dryRun        = true;  break;
+      case "--diff":             flags.diff          = true;  break;
+      case "--override-stubs":   flags.overrideStubs = true;  break;
+      case "--help": case "-h":  flags.help          = true;  break;
+      case "--version": case "-v": flags.version     = true;  break;
+      case "--template": case "-t":  flags.template     = rest[++i]; break;
+      case "--output":  case "-o":   flags.output       = rest[++i]; break;
+      case "--confirm":              flags.confirm       = rest[++i]; break;
+      case "--json":                 flags.json          = rest[++i]; break;
+      case "--file-strategy":        flags.fileStrategy  = rest[++i]; break;
+      case "--backup":               flags.backup        = rest[++i]; break;
+      case "--repo":                 flags.repo          = rest[++i]; break;
+      case "--branch":               flags.branch        = rest[++i]; break;
+      case "--commit":               flags.commit        = rest[++i]; break;
+      default:
+        if (!a.startsWith("-")) positional.push(a);
     }
   }
 
@@ -145,7 +130,7 @@ function parseArgs(argv) {
 }
 
 // ---------------------------------------------------------------------------
-// Help text
+// Help
 // ---------------------------------------------------------------------------
 
 const HELP = `
@@ -158,38 +143,40 @@ COMMANDS
   generate    Create / update files declared in a .mdix template
   nuke        Remove all files previously generated from a template
   snapshot    Write a plain-text directory layout snapshot
-  validate    Validate a .mdix template file (requires mdix CLI)
-  convert     Convert a .mdix template to JSON  (requires mdix CLI)
+  validate    Validate a .mdix template file  (requires mdix CLI)
+  convert     Convert a .mdix template to JSON (requires mdix CLI)
+  templates   List available project templates in .mdix/project_structure/templates/
   help        Show this message
 
 GENERATE OPTIONS
   --template, -t  <path>   Path to .mdix template
                            (default: ${DEFAULT_TEMPLATE})
   --dry-run                Preview without writing anything
-  --override-stubs         Overwrite existing stub files
-  --json        <path>     Path for converted structure JSON
-                           (default: ${DEFAULT_JSON_OUT})
+  --diff                   Show unified diffs alongside --dry-run
+  --override-stubs         Overwrite all existing files (alias for --file-strategy overwrite)
+  --file-strategy <s>      skip | overwrite | backup | rename  (default: skip)
+  --backup        <dir>    Backup directory when --file-strategy=backup
+  --json          <path>   Path for converted structure JSON (default: ${DEFAULT_JSON_OUT})
 
 NUKE OPTIONS
   --confirm DELETE         Required safety flag
-  --template, -t  <path>  Same template used to generate
+  --template, -t  <path>   Same template used to generate
 
 SNAPSHOT OPTIONS
   --output, -o <path>      Output file (default: others/ProjectStructure.txt)
-  --repo       <str>       Repository name shown in header
-  --branch     <str>       Branch name shown in header
+  --repo       <str>       Repository shown in header
+  --branch     <str>       Branch shown in header
   --commit     <str>       Commit SHA shown in header
-
-VALIDATE / CONVERT
-  [template]               Defaults to ${DEFAULT_TEMPLATE}
 
 EXAMPLES
   mdix-scaffold generate
   mdix-scaffold generate --dry-run
+  mdix-scaffold generate --dry-run --diff
+  mdix-scaffold generate --file-strategy backup --backup /tmp/bak
   mdix-scaffold generate --override-stubs
   mdix-scaffold nuke --confirm DELETE
   mdix-scaffold snapshot
-  mdix-scaffold validate
+  mdix-scaffold templates
 `;
 
 // ---------------------------------------------------------------------------
@@ -198,54 +185,59 @@ EXAMPLES
 
 function cmdGenerate(flags, positional) {
   const template = flags.template || positional[0] || DEFAULT_TEMPLATE;
-  const jsonPath = flags.json || DEFAULT_JSON_OUT;
-  const mdix = findMdix();
+  const jsonPath = flags.json     || DEFAULT_JSON_OUT;
+  const mdix     = findMdix();
 
-  console.log(`\n→ Validating template: ${template}`);
+  console.log(`\n→ Validating: ${template}`);
   run(mdix, ["validate", template]);
 
-  console.log(`\n→ Converting template to JSON: ${jsonPath}`);
+  console.log(`\n→ Converting to JSON: ${jsonPath}`);
   run(mdix, ["convert", template, "--to", "json", "-o", jsonPath]);
 
-  // Load manifest if it exists
   const manifestMdix = ".mdix/.manifest.mdix";
-  const manifestJson = "/tmp/mdix_manifest.json";
   if (fs.existsSync(manifestMdix)) {
-    console.log("\n→ Reading existing manifest...");
-    run(mdix, ["convert", manifestMdix, "--to", "json", "-o", manifestJson]);
+    console.log("\n→ Reading manifest...");
+    run(mdix, ["convert", manifestMdix, "--to", "json", "-o", DEFAULT_MANIFEST]);
   }
 
   console.log("\n→ Generating project structure...");
-  const pyArgs = ["--template", template, "--structure-json", jsonPath];
-  if (fs.existsSync(manifestJson)) {
-    pyArgs.push("--manifest-json", manifestJson);
+
+  const pyArgs = [
+    "--template",        template,
+    "--structure-json",  jsonPath,
+  ];
+  if (fs.existsSync(DEFAULT_MANIFEST)) {
+    pyArgs.push("--manifest-json", DEFAULT_MANIFEST);
   }
-  if (flags.dryRun)         pyArgs.push("--dry-run");
-  if (flags.overrideStubs)  pyArgs.push("--override-stubs");
+  if (flags.dryRun)        pyArgs.push("--dry-run");
+  if (flags.diff)          pyArgs.push("--diff");
+  if (flags.overrideStubs) pyArgs.push("--override-stubs");
+  if (flags.fileStrategy)  pyArgs.push("--file-strategy", flags.fileStrategy);
+  if (flags.backup)        pyArgs.push("--backup", flags.backup);
 
   runPy("generate_structure.py", pyArgs);
 }
 
 function cmdNuke(flags, positional) {
   if (!flags.confirm) {
-    console.error('ERROR: --confirm DELETE is required to nuke.');
+    console.error("ERROR: --confirm DELETE is required to nuke.");
     process.exit(1);
   }
 
   const template = flags.template || positional[0] || DEFAULT_TEMPLATE;
-  const jsonPath = flags.json || DEFAULT_JSON_OUT;
-  const mdix = findMdix();
+  const jsonPath = flags.json     || DEFAULT_JSON_OUT;
+  const mdix     = findMdix();
 
-  console.log(`\n→ Validating template: ${template}`);
+  console.log(`\n→ Validating: ${template}`);
   run(mdix, ["validate", template]);
 
-  console.log(`\n→ Converting template to JSON: ${jsonPath}`);
+  console.log(`\n→ Converting to JSON: ${jsonPath}`);
   run(mdix, ["convert", template, "--to", "json", "-o", jsonPath]);
 
   console.log("\n→ Removing generated files...");
   runPy("nuke_structure.py", [
-    "--confirm", flags.confirm,
-    "--template", template,
+    "--confirm",        flags.confirm,
+    "--template",       template,
     "--structure-json", jsonPath,
   ]);
 }
@@ -256,7 +248,6 @@ function cmdSnapshot(flags) {
   if (flags.repo)   pyArgs.push("--repo",   flags.repo);
   if (flags.branch) pyArgs.push("--branch", flags.branch);
   if (flags.commit) pyArgs.push("--commit", flags.commit);
-
   runPy("update_structure.py", pyArgs);
 }
 
@@ -275,6 +266,27 @@ function cmdConvert(flags, positional) {
   console.log(`\n→ Converting ${template} → ${jsonPath}`);
   run(mdix, ["convert", template, "--to", "json", "-o", jsonPath]);
   console.log(`Done: ${jsonPath}`);
+}
+
+function cmdTemplates() {
+  const dir = path.join(PKG_ROOT, ".mdix", "project_structure", "templates");
+  if (!fs.existsSync(dir)) {
+    console.log("No templates directory found at .mdix/project_structure/templates/");
+    return;
+  }
+  const files = fs.readdirSync(dir).filter(f => f.endsWith(".mdix"));
+  if (files.length === 0) {
+    console.log("No templates found in .mdix/project_structure/templates/");
+    return;
+  }
+  console.log("\nAvailable project templates:\n");
+  for (const f of files) {
+    const name = f.replace(/\.mdix$/, "");
+    console.log(`  ${name.padEnd(20)}  .mdix/project_structure/templates/${f}`);
+  }
+  console.log(
+    "\nUsage: mdix-scaffold generate --template .mdix/project_structure/templates/<name>.mdix"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,13 +308,16 @@ function main() {
   }
 
   switch (cmd) {
-    case "generate": cmdGenerate(flags, positional); break;
-    case "nuke":     cmdNuke(flags, positional);     break;
-    case "snapshot": cmdSnapshot(flags);             break;
-    case "validate": cmdValidate(flags, positional); break;
-    case "convert":  cmdConvert(flags, positional);  break;
+    case "generate":  cmdGenerate(flags, positional);  break;
+    case "nuke":      cmdNuke(flags, positional);      break;
+    case "snapshot":  cmdSnapshot(flags);              break;
+    case "validate":  cmdValidate(flags, positional);  break;
+    case "convert":   cmdConvert(flags, positional);   break;
+    case "templates": cmdTemplates();                  break;
     default:
-      console.error(`Unknown command: '${cmd}'\nRun 'mdix-scaffold help' for usage.`);
+      console.error(
+        `Unknown command: '${cmd}'\nRun 'mdix-scaffold help' for usage.`
+      );
       process.exit(1);
   }
 }
