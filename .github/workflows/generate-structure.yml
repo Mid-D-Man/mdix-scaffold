@@ -15,6 +15,10 @@ on:
         description: 'Preview without writing anything (true/false)'
         required: false
         default: 'false'
+      file_strategy:
+        description: 'How to handle existing files: skip | overwrite | backup | rename'
+        required: false
+        default: 'skip'
   push:
     paths:
       - '.mdix/project_structure/**'
@@ -33,6 +37,10 @@ on:
         required: false
         type: string
         default: 'false'
+      file_strategy:
+        required: false
+        type: string
+        default: 'skip'
 
 jobs:
   generate:
@@ -62,55 +70,61 @@ jobs:
       - name: Build mdix CLI (cache miss only)
         if: steps.cache-mdix.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — building mdix CLI from source..."
           git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
           cd /tmp/dixscript
           cargo build -p mdix-cli --release
           mkdir -p ~/.mdix-bin
           cp target/release/mdix ~/.mdix-bin/mdix
-          echo "Build complete."
 
       - name: Install mdix to PATH
         run: |
           sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
           echo "mdix version: $(mdix --version)"
 
+      - name: Resolve generation script
+        id: script
+        run: |
+          if [ -f "scripts/generate_structure.py" ]; then
+            echo "path=scripts/generate_structure.py" >> "$GITHUB_OUTPUT"
+            echo "Using local script from repo."
+          else
+            echo "Local script not found — fetching from mdix-scaffold..."
+            curl -fsSL \
+              "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/generate_structure.py" \
+              -o /tmp/generate_structure.py
+            echo "path=/tmp/generate_structure.py" >> "$GITHUB_OUTPUT"
+            echo "Using fetched script."
+          fi
+
       - name: Validate template
         run: |
-          TEMPLATE="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
-          echo "Validating: $TEMPLATE"
-          mdix validate "$TEMPLATE"
+          TMPL="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
+          echo "Validating: $TMPL"
+          mdix validate "$TMPL"
           echo "Validation passed."
 
       - name: Convert template to JSON
         run: |
-          TEMPLATE="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
-          mdix convert "$TEMPLATE" --to json -o /tmp/structure.json
-          echo "Resolved keys:"
-          python3 -c "
-          import json
-          d = json.load(open('/tmp/structure.json'))
-          for k in sorted(d.keys()):
-              print(f'  {k} = {str(d[k])[:60]}')
-          "
+          TMPL="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
+          mdix convert "$TMPL" --to json -o /tmp/structure.json
 
       - name: Convert manifest to JSON (if exists)
         run: |
-          if [ -f .mdix/.manifest.mdix ]; then
-            echo "Reading existing manifest..."
+          if [ -f ".mdix/.manifest.mdix" ]; then
             mdix convert .mdix/.manifest.mdix --to json -o /tmp/manifest.json
           else
-            echo "No manifest found — first run."
+            echo "No manifest — first run."
           fi
 
       - name: Generate project structure
         env:
+          TEMPLATE_PATH:  ${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}
           OVERRIDE_STUBS: ${{ inputs.override_stubs || 'false' }}
           DRY_RUN:        ${{ inputs.dry_run || 'false' }}
-          TEMPLATE_PATH:  ${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}
+          FILE_STRATEGY:  ${{ inputs.file_strategy || 'skip' }}
           STRUCTURE_JSON: /tmp/structure.json
           MANIFEST_JSON:  /tmp/manifest.json
-        run: python3 scripts/generate_structure.py
+        run: python3 ${{ steps.script.outputs.path }}
 
       - name: Show git status
         if: ${{ inputs.dry_run != 'true' }}
@@ -123,6 +137,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git diff --staged --quiet \
-            && echo "Nothing new to commit — structure is already up to date." \
+            && echo "Nothing new to commit — structure is up to date." \
             || git commit -m "chore: sync project structure from template [skip ci]"
           git push
