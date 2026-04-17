@@ -2,8 +2,8 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : 95a38a6e43ba47521fa96c0d5f1fe55d2eea155f
-Generated  : 2026-04-17T10:46:16Z
+Commit     : d099a5d492a73e0e55427d2936fb1ac0e1c8c447
+Generated  : 2026-04-17T10:47:34Z
 
 Directory Layout
 ================
@@ -17,6 +17,7 @@ Directory Layout
   .github/workflows/bootstrap.yml
   .github/workflows/generate-structure.yml
   .github/workflows/nuke-structure.yml
+  .github/workflows/nuke-workflow-history.yml.txt
   .github/workflows/update-project-structure.yml
   .vscode
   .vscode/extensions.json
