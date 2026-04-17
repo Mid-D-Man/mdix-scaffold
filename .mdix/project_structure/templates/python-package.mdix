@@ -1,0 +1,63 @@
+// =============================================================================
+// TEMPLATE: Python Package
+// Use with: mdix-scaffold generate --template .mdix/project_structure/templates/python-package.mdix
+// Mappings: project_name, description, author, author_email, github_user, python_version
+// =============================================================================
+
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext)                 { return { name = name, ext = ext, content = "" } }
+  ~fc<object>(name, ext, content)       { return { name = name, ext = ext, content = content } }
+  ~fremote<object>(name, ext, url)      { return { name = name, ext = ext, content = "remote::" + url } }
+  ~gitkeep<object>()                    { return { name = ".gitkeep", ext = "", content = "" } }
+  ~hidden<object>(seg)                  { return { segment = seg } }
+)
+
+@DATA(
+  project_name   = "my-python-package"
+  description    = "A Python package"
+  author         = "YourName"
+  author_email   = "you@example.com"
+  github_user    = "your-github-username"
+  python_version = "3.12"
+
+  hidden_dirs::
+    hidden("github")
+
+  post_hooks::
+    "echo 'Tip: python -m pip install -e .[dev] to install in dev mode'"
+
+  src::
+    fc("__init__",  "py", "\"\"\"[[description]]\"\"\"\n\n__version__ = \"0.1.0\"\n__author__  = \"[[author]]\"\n")
+    fc("_core",     "py", "# Core implementation\n")
+    fc("exceptions","py", "class [[project_name|title]]Error(Exception):\n    \"\"\"Base exception for [[project_name]].\"\"\"\n")
+    fc("types",     "py", "from __future__ import annotations\n\n# Type aliases and data classes\n")
+
+  src.utils::
+    fc("__init__",  "py", "\"\"\"Utility helpers.\"\"\"\n")
+
+  tests::
+    fc("__init__",     "py", "")
+    fc("test_core",    "py", "import pytest\nfrom src import [[project_name]]\n\ndef test_import():\n    assert [[project_name]] is not None\n")
+    fc("conftest",     "py", "import pytest\n\n@pytest.fixture\ndef sample_data():\n    return {}\n")
+
+  docs::
+    fc("index",        "md", "# [[project_name]]\n\n[[description]]\n")
+    fc("api",          "md", "# API Reference\n")
+    fc("contributing", "md", "# Contributing\n\nPRs welcome.\n")
+    gitkeep()
+
+  github.workflows::
+    fc("ci", "yml", "name: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        python-version: [\"[[python_version]]\"]\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: ${{ matrix.python-version }}\n      - run: pip install -e .[dev]\n      - run: pytest\n      - run: ruff check .\n")
+
+  root::
+    fc("README",         "md",   "# [[project_name]]\n\n[[description]]\n\n## Install\n\n```bash\npip install [[project_name]]\n```\n\n## License\n\nMIT\n")
+    fc("pyproject",      "toml", "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[project]\nname = \"[[project_name]]\"\nversion = \"0.1.0\"\ndescription = \"[[description]]\"\nauthors = [{name = \"[[author]]\", email = \"[[author_email]]\"}]\nlicense = {text = \"MIT\"}\nrequires-python = \">= [[python_version]]\"\n\n[project.optional-dependencies]\ndev = [\"pytest\", \"ruff\", \"mypy\"]\n")
+    fremote("LICENSE", "", "https://raw.githubusercontent.com/nicklockwood/MIT-License/master/MIT-License")
+    fc(".gitignore", "", "__pycache__/\n*.pyc\n*.egg-info/\ndist/\nbuild/\n.venv/\n.env\n.DS_Store\n")
+)
