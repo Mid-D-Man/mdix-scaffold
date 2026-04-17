@@ -2,8 +2,8 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : 394d7b8c4c18ca83502cec2f3fb50c751d947d30
-Generated  : 2026-04-17T17:45:43Z
+Commit     : c35d86df8c4d44ed15e008bffe4eb73286842f45
+Generated  : 2026-04-17T17:46:38Z
 
 Directory Layout
 ================
@@ -36,6 +36,7 @@ Directory Layout
   scripts/lib_mappings.py
   scripts/lib_remote.py
   scripts/nuke_structure.py
+  scripts/setup_mdix.py
   scripts/test_scaffold.py
   scripts/update_structure.py
   src
