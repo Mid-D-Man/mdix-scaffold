@@ -342,6 +342,7 @@ function main() {
     case "convert":     cmdConvert(flags, positional);   break;
     case "templates":   cmdTemplates();                  break;
     case "clear-cache": cmdClearCache();                 break;
+      case "setup":       cmdSetup(flags);             break;
     default:
       console.error(`Unknown command: '${cmd}'\nRun 'mdix-scaffold help' for usage.`);
       process.exit(1);
