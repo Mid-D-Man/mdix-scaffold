@@ -2,8 +2,8 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : 5f4c39f4fadc08e10d6035172ec9a58dd8d57fa9
-Generated  : 2026-04-17T10:48:09Z
+Commit     : 9678c44700a6c58daa4c4d0d16a3dd3a65944e10
+Generated  : 2026-04-17T17:42:58Z
 
 Directory Layout
 ================
@@ -52,6 +52,7 @@ Directory Layout
 DixScript Files (.mdix)
 =======================
   .mdix/.manifest.mdix
+  .mdix/env/mappings.mdix
   .mdix/project_structure/project_structure.mdix
   .mdix/project_structure/templates/node-api.mdix
   .mdix/project_structure/templates/python-package.mdix
