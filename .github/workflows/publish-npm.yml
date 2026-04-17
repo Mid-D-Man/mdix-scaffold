@@ -1,0 +1,47 @@
+name: Publish to npm
+
+# Triggers when you push a version tag: git tag v1.2.0 && git push --tags
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.0
+          VERSION="${TAG#v}"                # strip leading v
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Verify package.json version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
+            echo "Update package.json version before tagging."
+            exit 1
+          fi
+          echo "✓ Version match: $PKG_VERSION"
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
