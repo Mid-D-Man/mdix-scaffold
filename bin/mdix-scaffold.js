@@ -231,7 +231,11 @@ function cmdGenerate(flags, positional) {
 
   runPy("generate_structure.py", pyArgs);
 }
-
+function cmdSetup(flags) {
+  const pyArgs = [];
+  if (flags.force || process.argv.includes("--force")) pyArgs.push("--force");
+  runPy("setup_mdix.py", pyArgs);
+}
 function cmdNuke(flags, positional) {
   if (!flags.confirm) {
     console.error("ERROR: --confirm DELETE is required.");
