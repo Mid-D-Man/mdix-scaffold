@@ -1,0 +1,40 @@
+// =============================================================================
+// MAPPINGS FILE  ·  DixScript v1.0.0
+// =============================================================================
+//
+// This file defines [[key]] substitution values used during scaffold generation.
+//
+// Usage:
+//   mdix-scaffold generate --mappings .mdix/env/mappings.mdix
+//
+// In any template content string, [[key]] is replaced with the value here.
+// Nested keys use dot notation: [[ci.node_version]]
+//
+// Edit this file for your project, then run generate.
+// =============================================================================
+
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "data"
+  debug_mode -> "off"
+)
+
+@DATA(
+  // ── Project identity ────────────────────────────────────────────────────
+  project_name   = "my-project"
+  description    = "My project description"
+  author         = "YourName"
+  author_email   = "you@example.com"
+  github_user    = "your-github-username"
+  license        = "MIT"
+
+  // ── Runtime versions ────────────────────────────────────────────────────
+  port           = "3000"
+  python_version = "3.12"
+
+  // ── CI settings (table property — resolves as ci.node_version etc.) ─────
+  ci: node_version = "20", rust_toolchain = "stable", python_version = "3.12"
+
+  // ── Organisation ────────────────────────────────────────────────────────
+  org: name = "MidManStudio", url = "https://mid-d-man.github.io"
+)
