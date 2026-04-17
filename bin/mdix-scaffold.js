@@ -159,7 +159,8 @@ GENERATE OPTIONS
   --no-cache                 Skip remote-content cache
   --verbose                  Print remote fetches and mapping substitutions
   --json          <path>     Path for converted structure JSON
-
+setup        Install the mdix CLI binary from source (requires Rust/cargo)
+               --force    Rebuild even if already installed
 NUKE OPTIONS
   --confirm DELETE           Required safety flag
   --template, -t  <path>    Same template used to generate
