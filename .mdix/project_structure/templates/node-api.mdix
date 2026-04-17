@@ -1,0 +1,62 @@
+// =============================================================================
+// TEMPLATE: Node.js REST API (Express + TypeScript)
+// Use with: mdix-scaffold generate --template .mdix/project_structure/templates/node-api.mdix
+// Mappings: project_name, description, author, github_user, port
+// =============================================================================
+
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext)                 { return { name = name, ext = ext, content = "" } }
+  ~fc<object>(name, ext, content)       { return { name = name, ext = ext, content = content } }
+  ~fremote<object>(name, ext, url)      { return { name = name, ext = ext, content = "remote::" + url } }
+  ~gitkeep<object>()                    { return { name = ".gitkeep", ext = "", content = "" } }
+  ~hidden<object>(seg)                  { return { segment = seg } }
+)
+
+@DATA(
+  project_name = "my-node-api"
+  description  = "A Node.js REST API"
+  author       = "YourName"
+  github_user  = "your-github-username"
+  port         = "3000"
+
+  hidden_dirs::
+    hidden("github")
+
+  post_hooks::
+    "echo 'Tip: npm install then npm run dev to start'"
+
+  src::
+    fc("index",  "ts", "import app from './app';\n\nconst PORT = process.env.PORT || [[port]];\n\napp.listen(PORT, () => {\n  console.log(`[[project_name]] running on port ${PORT}`);\n});\n")
+    fc("app",    "ts", "import express from 'express';\nimport helmet from 'helmet';\nimport cors from 'cors';\n\nconst app = express();\napp.use(helmet());\napp.use(cors());\napp.use(express.json());\n\napp.get('/health', (_req, res) => res.json({ status: 'ok' }));\n\nexport default app;\n")
+
+  src.routes::
+    fc("index",  "ts", "import { Router } from 'express';\n\nconst router = Router();\n\nrouter.get('/', (_req, res) => res.json({ message: 'Hello from [[project_name]]' }));\n\nexport default router;\n")
+
+  src.middleware::
+    fc("errorHandler", "ts", "import { Request, Response, NextFunction } from 'express';\n\nexport function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction) {\n  console.error(err.stack);\n  res.status(500).json({ error: err.message });\n}\n")
+    f("auth",          "ts")
+
+  src.types::
+    fc("index", "ts", "export interface ApiResponse<T> {\n  data: T;\n  message?: string;\n}\n")
+
+  tests::
+    fc("app.test", "ts", "import request from 'supertest';\nimport app from '../src/app';\n\ndescribe('Health check', () => {\n  it('GET /health → 200', async () => {\n    const res = await request(app).get('/health');\n    expect(res.status).toBe(200);\n  });\n});\n")
+    gitkeep()
+
+  github.workflows::
+    fc("ci", "yml", "name: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test\n      - run: npm run lint\n      - run: npm run build\n")
+
+  root::
+    fc("README",        "md",   "# [[project_name]]\n\n[[description]]\n\n## Quick start\n\n```bash\nnpm install\nnpm run dev\n```\n\n## API\n\n`GET /health` — service health check\n\n## License\n\nMIT\n")
+    fc("package",       "json", "{\n  \"name\": \"[[project_name]]\",\n  \"version\": \"0.1.0\",\n  \"description\": \"[[description]]\",\n  \"main\": \"dist/index.js\",\n  \"scripts\": {\n    \"dev\": \"ts-node-dev src/index.ts\",\n    \"build\": \"tsc\",\n    \"start\": \"node dist/index.js\",\n    \"test\": \"jest\",\n    \"lint\": \"eslint src/**/*.ts\"\n  },\n  \"author\": \"[[author]]\",\n  \"license\": \"MIT\",\n  \"dependencies\": {\n    \"cors\": \"^2.8.5\",\n    \"express\": \"^4.18.0\",\n    \"helmet\": \"^7.0.0\"\n  },\n  \"devDependencies\": {\n    \"@types/express\": \"^4.17.21\",\n    \"@types/jest\": \"^29.0.0\",\n    \"jest\": \"^29.0.0\",\n    \"supertest\": \"^6.3.0\",\n    \"ts-node-dev\": \"^2.0.0\",\n    \"typescript\": \"^5.0.0\"\n  }\n}\n")
+    fc("tsconfig",      "json", "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"commonjs\",\n    \"outDir\": \"./dist\",\n    \"rootDir\": \"./src\",\n    \"strict\": true,\n    \"esModuleInterop\": true,\n    \"skipLibCheck\": true\n  },\n  \"include\": [\"src/**/*\"],\n  \"exclude\": [\"node_modules\", \"dist\"]\n}\n")
+    fremote("LICENSE", "", "https://raw.githubusercontent.com/nicklockwood/MIT-License/master/MIT-License")
+    fc(".gitignore",    "", "node_modules/\ndist/\n.env\n*.log\n.DS_Store\n")
+    fc(".env.example",  "", "PORT=[[port]]\nNODE_ENV=development\n")
+)
