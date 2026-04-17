@@ -2,8 +2,8 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : 17770b9748a6a5afca683cc81af33d6644ba3f91
-Generated  : 2026-04-17T10:44:42Z
+Commit     : 4298e2475feebde1473842490a5741aa3865c5fa
+Generated  : 2026-04-17T10:45:19Z
 
 Directory Layout
 ================
@@ -52,6 +52,7 @@ DixScript Files (.mdix)
 =======================
   .mdix/.manifest.mdix
   .mdix/project_structure/project_structure.mdix
+  .mdix/project_structure/templates/node-api.mdix
   .mdix/project_structure/templates/python-package.mdix
   .mdix/project_structure/templates/rust-lib.mdix
 
