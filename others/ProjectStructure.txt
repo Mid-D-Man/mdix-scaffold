@@ -2,8 +2,8 @@ Project Structure Snapshot
 ==========================
 Repository : Mid-D-Man/mdix-scaffold
 Branch     : main
-Commit     : 4298e2475feebde1473842490a5741aa3865c5fa
-Generated  : 2026-04-17T10:45:19Z
+Commit     : 95a38a6e43ba47521fa96c0d5f1fe55d2eea155f
+Generated  : 2026-04-17T10:46:16Z
 
 Directory Layout
 ================
