@@ -1,0 +1,66 @@
+// =============================================================================
+// TEMPLATE: Rust Library Crate
+// Use with: mdix-scaffold generate --template .mdix/project_structure/templates/rust-lib.mdix
+// Mappings: project_name, description, author, github_user
+// =============================================================================
+
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~f<object>(name, ext)                 { return { name = name, ext = ext, content = "" } }
+  ~fc<object>(name, ext, content)       { return { name = name, ext = ext, content = content } }
+  ~fremote<object>(name, ext, url)      { return { name = name, ext = ext, content = "remote::" + url } }
+  ~gitkeep<object>()                    { return { name = ".gitkeep", ext = "", content = "" } }
+  ~hidden<object>(seg)                  { return { segment = seg } }
+)
+
+@DATA(
+  project_name = "my-rust-lib"
+  description  = "A Rust library crate"
+  author       = "YourName"
+  github_user  = "your-github-username"
+
+  hidden_dirs::
+    hidden("github")
+    hidden("vscode")
+
+  // Run cargo fmt after generation
+  post_hooks::
+    "echo 'Tip: run cargo fmt to format generated stubs'"
+
+  vscode::
+    fc("extensions", "json", "{\n  \"recommendations\": [\"rust-lang.rust-analyzer\"]\n}\n")
+
+  src::
+    fc("lib",  "rs", "//! [[description]]\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn it_works() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n")
+    f("error", "rs")
+    f("types", "rs")
+
+  src.utils::
+    f("mod", "rs")
+
+  tests::
+    f("integration_test", "rs")
+    gitkeep()
+
+  benches::
+    fc("benchmark", "rs", "use criterion::{black_box, criterion_group, criterion_main, Criterion};\n\npub fn criterion_benchmark(c: &mut Criterion) {\n    c.bench_function(\"example\", |b| b.iter(|| black_box(2 + 2)));\n}\n\ncriterion_group!(benches, criterion_benchmark);\ncriterion_main!(benches);\n")
+
+  examples::
+    fc("basic", "rs", "fn main() {\n    println!(\"Basic usage example\");\n}\n")
+    gitkeep()
+
+  github.workflows::
+    fc("ci", "yml", "name: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n      - run: cargo test\n      - run: cargo clippy -- -D warnings\n      - run: cargo fmt --check\n")
+
+  root::
+    fc("README",     "md",   "# [[project_name]]\n\n[[description]]\n\n## Usage\n\n```toml\n[dependencies]\n[[project_name]] = \"0.1\"\n```\n\n## License\n\nMIT\n")
+    fc("Cargo",      "toml", "[package]\nname = \"[[project_name]]\"\nversion = \"0.1.0\"\nedition = \"2021\"\nauthors = [\"[[author]]\"]\ndescription = \"[[description]]\"\nlicense = \"MIT\"\nrepository = \"https://github.com/[[github_user]]/[[project_name]]\"\n\n[dependencies]\n\n[dev-dependencies]\ncriterion = \"0.5\"\n\n[[bench]]\nname = \"benchmark\"\nharness = false\n")
+    fc("CHANGELOG",  "md",   "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n## [Unreleased]\n\n## [0.1.0] - Initial release\n")
+    fremote("LICENSE", "", "https://raw.githubusercontent.com/nicklockwood/MIT-License/master/MIT-License")
+    fc(".gitignore", "", "target/\n*.lock\n.env\n.DS_Store\n")
+)
