@@ -19,6 +19,10 @@ on:
         description: 'How to handle existing files: skip | overwrite | backup | rename'
         required: false
         default: 'skip'
+      mappings_file:
+        description: 'Path to .mdix mappings file for [[key]] substitution (leave blank to skip)'
+        required: false
+        default: ''
   push:
     paths:
       - '.mdix/project_structure/**'
@@ -41,6 +45,10 @@ on:
         required: false
         type: string
         default: 'skip'
+      mappings_file:
+        required: false
+        type: string
+        default: ''
 
 jobs:
   generate:
@@ -70,11 +78,13 @@ jobs:
       - name: Build mdix CLI (cache miss only)
         if: steps.cache-mdix.outputs.cache-hit != 'true'
         run: |
+          echo "Cache miss — building mdix CLI from source..."
           git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
           cd /tmp/dixscript
           cargo build -p mdix-cli --release
           mkdir -p ~/.mdix-bin
           cp target/release/mdix ~/.mdix-bin/mdix
+          echo "Build complete."
 
       - name: Install mdix to PATH
         run: |
@@ -93,8 +103,21 @@ jobs:
               "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/generate_structure.py" \
               -o /tmp/generate_structure.py
             echo "path=/tmp/generate_structure.py" >> "$GITHUB_OUTPUT"
-            echo "Using fetched script."
           fi
+
+      - name: Resolve remote + mappings libs
+        run: |
+          # Copy lib scripts alongside the generation script if local
+          SCRIPT_DIR=$(dirname "${{ steps.script.outputs.path }}")
+          for lib in lib_remote.py lib_mappings.py; do
+            if [ -f "scripts/$lib" ]; then
+              [ "$SCRIPT_DIR" != "scripts" ] && cp "scripts/$lib" "$SCRIPT_DIR/$lib"
+            else
+              curl -fsSL \
+                "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/$lib" \
+                -o "$SCRIPT_DIR/$lib"
+            fi
+          done
 
       - name: Validate template
         run: |
@@ -107,13 +130,35 @@ jobs:
         run: |
           TMPL="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
           mdix convert "$TMPL" --to json -o /tmp/structure.json
+          echo "Resolved keys:"
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/structure.json'))
+          for k in sorted(d.keys()):
+              print(f'  {k} = {str(d[k])[:60]}')
+          "
 
       - name: Convert manifest to JSON (if exists)
         run: |
           if [ -f ".mdix/.manifest.mdix" ]; then
+            echo "Reading existing manifest..."
             mdix convert .mdix/.manifest.mdix --to json -o /tmp/manifest.json
           else
-            echo "No manifest — first run."
+            echo "No manifest found — first run."
+          fi
+
+      - name: Convert mappings to JSON (if provided)
+        run: |
+          MAPPINGS="${{ inputs.mappings_file || '' }}"
+          if [ -n "$MAPPINGS" ] && [ -f "$MAPPINGS" ]; then
+            echo "Converting mappings: $MAPPINGS"
+            mdix validate "$MAPPINGS"
+            # lib_mappings.py will call mdix convert itself — just validate here
+            echo "Mappings file validated."
+          elif [ -n "$MAPPINGS" ]; then
+            echo "::warning::Mappings file specified but not found: $MAPPINGS"
+          else
+            echo "No mappings file — skipping."
           fi
 
       - name: Generate project structure
@@ -124,6 +169,7 @@ jobs:
           FILE_STRATEGY:  ${{ inputs.file_strategy || 'skip' }}
           STRUCTURE_JSON: /tmp/structure.json
           MANIFEST_JSON:  /tmp/manifest.json
+          MAPPINGS_FILE:  ${{ inputs.mappings_file || '' }}
         run: python3 ${{ steps.script.outputs.path }}
 
       - name: Show git status
