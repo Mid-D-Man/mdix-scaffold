@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-Generate a plain-text snapshot of the repository layout and write it to a file.
+Generate a .mdix snapshot of the repository layout.
+
+Output is a valid DixScript file containing only a @DATA section.
+Stored at others/ProjectStructure.mdix by default.
+
+Triggers:
+  - Manual:    python3 scripts/update_structure.py
+  - Workflow:  include [snapshot] anywhere in your commit message
+  - Actions:   workflow_dispatch
 
 Usage (local):
   python3 scripts/update_structure.py
-  python3 scripts/update_structure.py --output others/ProjectStructure.txt
+  python3 scripts/update_structure.py --output others/ProjectStructure.mdix
   python3 scripts/update_structure.py --repo my-org/my-repo --branch main --commit abc123
-
-Usage (from GitHub Actions):
-  Called by update-project-structure.yml — env vars are injected by the workflow.
 """
 
 import argparse
 import os
 import re
-import subprocess
 import sys
+from datetime import datetime, timezone
 
 
 # ---------------------------------------------------------------------------
@@ -24,17 +29,17 @@ import sys
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate a project structure snapshot file."
+        description="Generate a .mdix project structure snapshot."
     )
     parser.add_argument(
         "--output", "-o",
-        default=os.environ.get("OUTPUT_FILE", "others/ProjectStructure.txt"),
-        help="Output file path (default: others/ProjectStructure.txt)",
+        default=os.environ.get("OUTPUT_FILE", "others/ProjectStructure.mdix"),
+        help="Output file path (default: others/ProjectStructure.mdix)",
     )
     parser.add_argument(
         "--repo",
         default=os.environ.get("GITHUB_REPOSITORY", ""),
-        help="Repository name in owner/repo format",
+        help="Repository in owner/repo format",
     )
     parser.add_argument(
         "--branch",
@@ -55,33 +60,28 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
-# Rust workspace helpers
+# Rust workspace detection
 # ---------------------------------------------------------------------------
 
 def parse_workspace_members(cargo_toml_path):
-    """Extract workspace members from a Cargo.toml file."""
     try:
         with open(cargo_toml_path) as f:
             text = f.read()
     except OSError:
         return []
-
     m = re.search(r"members\s*=\s*\[(.*?)\]", text, re.DOTALL)
     if not m:
         return []
-
-    raw = m.group(1)
     return [
         s.strip().strip('"').strip("'")
-        for s in raw.split(",")
+        for s in m.group(1).split(",")
         if s.strip().strip('"').strip("'")
     ]
 
 
-def collect_rs_files(members, subdir):
-    """Walk subdir under each workspace member and collect .rs files."""
+def collect_rs_files(member_dirs, subdir):
     files = []
-    for member in members:
+    for member in member_dirs:
         d = os.path.join(member, subdir)
         if os.path.isdir(d):
             for root, _, fnames in os.walk(d):
@@ -91,45 +91,38 @@ def collect_rs_files(members, subdir):
     return sorted(files)
 
 
-def rust_workspace_section(root, lines):
+def rust_workspace_info(root):
+    """
+    Returns a dict with workspace info if this is a Rust workspace, else None.
+    {
+      members: [str],
+      src_files: [str],
+      test_files: [str],
+      bench_files: [str],
+      totals: {src, tests, benches},
+      per_member: {member: {src, tests, benches}}
+    }
+    """
     cargo_toml = os.path.join(root, "Cargo.toml")
-    if not (os.path.exists(cargo_toml) and
-            re.search(r"^\[workspace\]", open(cargo_toml).read(), re.MULTILINE)):
-        return False
+    if not os.path.exists(cargo_toml):
+        return None
+    try:
+        content = open(cargo_toml).read()
+    except OSError:
+        return None
+    if not re.search(r"^\[workspace\]", content, re.MULTILINE):
+        return None
 
     members = parse_workspace_members(cargo_toml)
+    member_dirs = [os.path.join(root, m) for m in members]
 
-    lines.append("Rust Workspace Members")
-    lines.append("======================")
-    for m in members:
-        status = "✓" if os.path.isdir(os.path.join(root, m)) else "✗ (missing)"
-        lines.append(f"  {status} {m}/")
-    lines.append("")
+    src_files   = collect_rs_files(member_dirs, "src")
+    test_files  = collect_rs_files(member_dirs, "tests")
+    bench_files = collect_rs_files(member_dirs, "benches")
 
-    for category, label in [
-        ("src",    "Source Files"),
-        ("tests",  "Test Files"),
-        ("benches","Benchmark Files"),
-    ]:
-        rs_files = collect_rs_files(
-            [os.path.join(root, m) for m in members],
-            category,
-        )
-        lines.append(label)
-        lines.append("=" * len(label))
-        if rs_files:
-            for f in rs_files:
-                # Make path relative to root
-                lines.append("  " + os.path.relpath(f, root))
-        else:
-            lines.append("  (none found)")
-        lines.append("")
-
-    # File count summary
-    lines.append("File Count Summary")
-    lines.append("==================")
     totals = {"src": 0, "tests": 0, "benches": 0}
     per_member = {}
+
     for member in members:
         full = os.path.join(root, member)
         if not os.path.isdir(full):
@@ -145,90 +138,184 @@ def rust_workspace_section(root, lines):
             totals[cat] += count
         per_member[member] = counts
 
-    lines.append(f"  Source files    : {totals['src']}")
-    lines.append(f"  Test files      : {totals['tests']}")
-    lines.append(f"  Benchmark files : {totals['benches']}")
-    lines.append(f"  Total           : {sum(totals.values())}")
-    lines.append("")
-    lines.append("  Per-member breakdown:")
-    for member, counts in per_member.items():
-        lines.append(
-            f"    {member}: src={counts['src']}  "
-            f"tests={counts['tests']}  benches={counts['benches']}"
-        )
-    lines.append("")
-    return True
+    return {
+        "members":     members,
+        "src_files":   [os.path.relpath(f, root) for f in src_files],
+        "test_files":  [os.path.relpath(f, root) for f in test_files],
+        "bench_files": [os.path.relpath(f, root) for f in bench_files],
+        "totals":      totals,
+        "per_member":  per_member,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Generic directory layout
+# Directory layout
 # ---------------------------------------------------------------------------
 
-EXCLUDE_DIRS = {".git", "target", "node_modules", ".mdix"}
+EXCLUDE_DIRS  = {".git", "target", "node_modules"}
 EXCLUDE_FILES = {".mdix/.manifest.mdix"}
 
 
-def generic_layout_section(root, lines):
-    lines.append("Directory Layout")
-    lines.append("================")
-    all_paths = []
+def collect_layout(root):
+    paths = []
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune excluded directories in-place
-        dirnames[:] = [
-            d for d in sorted(dirnames)
-            if d not in EXCLUDE_DIRS
-        ]
+        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDE_DIRS)
         rel = os.path.relpath(dirpath, root)
-        if rel == ".":
-            all_paths.append(".")
-        else:
-            all_paths.append(rel)
+        paths.append("." if rel == "." else rel)
         for fname in sorted(filenames):
-            frel = os.path.join(rel, fname) if rel != "." else fname
+            frel = fname if rel == "." else os.path.join(rel, fname)
             if frel not in EXCLUDE_FILES:
-                all_paths.append(frel)
-
-    for p in all_paths:
-        lines.append("  " + p)
-    lines.append("")
+                paths.append(frel)
+    return paths
 
 
-# ---------------------------------------------------------------------------
-# Always-included sections
-# ---------------------------------------------------------------------------
-
-def mdix_files_section(root, lines):
-    lines.append("DixScript Files (.mdix)")
-    lines.append("=======================")
+def collect_mdix_files(root):
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d != ".git"]
         for fname in filenames:
             if fname.endswith(".mdix"):
                 found.append(os.path.relpath(os.path.join(dirpath, fname), root))
-    if found:
-        for f in sorted(found):
-            lines.append("  " + f)
-    else:
-        lines.append("  (none)")
-    lines.append("")
+    return sorted(found)
 
 
-def workflows_section(root, lines):
-    lines.append("GitHub Workflows")
-    lines.append("================")
+def collect_workflows(root):
     wf_dir = os.path.join(root, ".github", "workflows")
-    if os.path.isdir(wf_dir):
-        yamls = sorted(
-            f for f in os.listdir(wf_dir) if f.endswith(".yml")
-        )
-        if yamls:
-            for y in yamls:
-                lines.append("  " + os.path.join(".github", "workflows", y))
-        else:
-            lines.append("  (none)")
+    if not os.path.isdir(wf_dir):
+        return []
+    return sorted(
+        os.path.join(".github", "workflows", f)
+        for f in os.listdir(wf_dir)
+        if f.endswith(".yml")
+    )
+
+
+# ---------------------------------------------------------------------------
+# .mdix renderer
+# ---------------------------------------------------------------------------
+
+def _q(s):
+    """Quote a string value for DixScript."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _array_block(items, indent=4):
+    """Render a list of strings as a DixScript group array block."""
+    pad = " " * indent
+    if not items:
+        return f'{pad}"(none)"'
+    return "\n".join(f"{pad}{_q(item)}" for item in items)
+
+
+def render_mdix_snapshot(args, root, now):
+    """
+    Render the full .mdix snapshot. Only @DATA — no @CONFIG, no @QUICKFUNCS.
+    Clean, human-readable, properly indented.
+    """
+    lines = []
+
+    def ln(s=""):
+        lines.append(s)
+
+    ln("// =============================================================================")
+    ln("// PROJECT STRUCTURE SNAPSHOT  ·  DixScript v1.0.0")
+    ln("// Auto-generated by scripts/update_structure.py")
+    ln("// Do not edit manually — regenerate with [snapshot] in your commit message")
+    ln("//   or run: python3 scripts/update_structure.py")
+    ln("// =============================================================================")
+    ln()
+    ln("@DATA(")
+
+    # ── Header metadata ──────────────────────────────────────────────────────
+    if args.repo:
+        ln(f"  repository = {_q(args.repo)}")
+    if args.branch:
+        ln(f"  branch     = {_q(args.branch)}")
+    if args.commit:
+        ln(f"  commit     = {_q(args.commit[:12] if len(args.commit) > 12 else args.commit)}")
+    ln(f"  generated  = {_q(now)}")
+    ln()
+
+    # ── Rust workspace (if applicable) ───────────────────────────────────────
+    ws = rust_workspace_info(root)
+    if ws:
+        ln("  // ── Rust Workspace ───────────────────────────────────────────────────")
+        ln()
+
+        ln("  workspace_members::")
+        for m in ws["members"]:
+            ln(f"    {_q(m + '/')}")
+        ln()
+
+        for key, label, files in [
+            ("src_files",   "source_files",    ws["src_files"]),
+            ("test_files",  "test_files",       ws["test_files"]),
+            ("bench_files", "benchmark_files",  ws["bench_files"]),
+        ]:
+            ln(f"  {label}::")
+            if files:
+                for f in files:
+                    ln(f"    {_q(f)}")
+            else:
+                ln('    "(none)"')
+            ln()
+
+        # File count summary as flat properties
+        ln("  // ── File count summary ─────────────────────────────────────────────────")
+        ln(f"  total_source_files    = {ws['totals']['src']}")
+        ln(f"  total_test_files      = {ws['totals']['tests']}")
+        ln(f"  total_benchmark_files = {ws['totals']['benches']}")
+        ln(f"  total_files           = {sum(ws['totals'].values())}")
+        ln()
+
+        # Per-member breakdown as table properties
+        ln("  // ── Per-member breakdown ────────────────────────────────────────────────")
+        for member, counts in ws["per_member"].items():
+            safe_key = member.replace("-", "_").replace("/", "_")
+            ln(
+                f"  {safe_key}: "
+                f"src = {counts['src']}, "
+                f"tests = {counts['tests']}, "
+                f"benches = {counts['benches']}"
+            )
+        ln()
+
     else:
-        lines.append("  (none)")
+        # ── Generic directory layout ──────────────────────────────────────────
+        ln("  // ── Directory layout ────────────────────────────────────────────────────")
+        ln()
+        layout = collect_layout(root)
+        ln("  directory_layout::")
+        for p in layout:
+            ln(f"    {_q(p)}")
+        ln()
+
+    # ── DixScript files ───────────────────────────────────────────────────────
+    ln("  // ── DixScript files (.mdix) ─────────────────────────────────────────────")
+    ln()
+    mdix_files = collect_mdix_files(root)
+    ln("  mdix_files::")
+    if mdix_files:
+        for f in mdix_files:
+            ln(f"    {_q(f)}")
+    else:
+        ln('    "(none)"')
+    ln()
+
+    # ── GitHub workflows ──────────────────────────────────────────────────────
+    ln("  // ── GitHub workflows ────────────────────────────────────────────────────")
+    ln()
+    workflows = collect_workflows(root)
+    ln("  github_workflows::")
+    if workflows:
+        for w in workflows:
+            ln(f"    {_q(w)}")
+    else:
+        ln('    "(none)"')
+    ln()
+
+    ln(")")
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -236,42 +323,20 @@ def workflows_section(root, lines):
 # ---------------------------------------------------------------------------
 
 def run(args):
-    root = os.path.abspath(args.root)
-
-    # Ensure output directory exists
+    root    = os.path.abspath(args.root)
+    now     = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out_dir = os.path.dirname(args.output)
+
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    lines = []
-    lines.append("Project Structure Snapshot")
-    lines.append("==========================")
-    if args.repo:
-        lines.append(f"Repository : {args.repo}")
-    if args.branch:
-        lines.append(f"Branch     : {args.branch}")
-    if args.commit:
-        lines.append(f"Commit     : {args.commit}")
-    lines.append(f"Generated  : {now}")
-    lines.append("")
-
-    is_rust = rust_workspace_section(root, lines)
-    if not is_rust:
-        generic_layout_section(root, lines)
-
-    mdix_files_section(root, lines)
-    workflows_section(root, lines)
-
-    output = "\n".join(lines) + "\n"
+    content = render_mdix_snapshot(args, root, now)
 
     with open(args.output, "w") as f:
-        f.write(output)
+        f.write(content)
 
     print(f"=== Snapshot written to {args.output} ===")
-    print(output)
+    print(content)
 
 
 if __name__ == "__main__":
