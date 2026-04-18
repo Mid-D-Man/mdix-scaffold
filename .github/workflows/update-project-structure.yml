@@ -1,23 +1,34 @@
-name: Update project structure
+name: Update project structure snapshot
+
+# Runs when:
+#   1. You include [snapshot] anywhere in your commit message
+#   2. You trigger it manually from the Actions tab
+#
+# Examples of commit messages that trigger it:
+#   "chore: tidy up src layout [snapshot]"
+#   "[snapshot] add new module structure"
+#   "docs: update readme [snapshot]"
+#
+# Everything else on push is ignored.
 
 on:
-  workflow_dispatch:
-    inputs:
-      output_file:
-        description: 'Output path for the structure snapshot'
-        required: false
-        default: 'others/ProjectStructure.txt'
   push:
     branches: [ main, master, develop ]
     paths-ignore:
-      - 'others/ProjectStructure.txt'
+      - 'others/ProjectStructure.mdix'
+  workflow_dispatch:
+    inputs:
+      output_file:
+        description: 'Output path for the snapshot'
+        required: false
+        default: 'others/ProjectStructure.mdix'
   workflow_call:
     inputs:
       output_file:
-        description: 'Output path for the structure snapshot'
+        description: 'Output path for the snapshot'
         required: false
         type: string
-        default: 'others/ProjectStructure.txt'
+        default: 'others/ProjectStructure.mdix'
 
 jobs:
   update-structure:
@@ -25,17 +36,38 @@ jobs:
     permissions:
       contents: write
 
+    # On push: only proceed when commit message contains [snapshot]
+    # On manual/workflow_call: always proceed
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'     ||
+      contains(github.event.head_commit.message, '[snapshot]')
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Generate project structure snapshot
-        env:
-          OUTPUT_FILE: ${{ inputs.output_file || 'others/ProjectStructure.txt' }}
+      - name: Resolve snapshot script
+        id: script
         run: |
-          python3 scripts/update_structure.py \
+          if [ -f "scripts/update_structure.py" ]; then
+            echo "path=scripts/update_structure.py" >> "$GITHUB_OUTPUT"
+            echo "Using local script."
+          else
+            echo "Fetching script from mdix-scaffold..."
+            curl -fsSL \
+              "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/update_structure.py" \
+              -o /tmp/update_structure.py
+            echo "path=/tmp/update_structure.py" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate structure snapshot
+        env:
+          OUTPUT_FILE: ${{ inputs.output_file || 'others/ProjectStructure.mdix' }}
+        run: |
+          python3 ${{ steps.script.outputs.path }} \
             --output "$OUTPUT_FILE" \
             --repo   "${{ github.repository }}" \
             --branch "${{ github.ref_name }}" \
@@ -43,13 +75,13 @@ jobs:
 
       - name: Commit snapshot if changed
         env:
-          OUTPUT_FILE: ${{ inputs.output_file || 'others/ProjectStructure.txt' }}
+          OUTPUT_FILE: ${{ inputs.output_file || 'others/ProjectStructure.mdix' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$OUTPUT_FILE"
           if git diff --staged --quiet; then
-            echo "Structure unchanged — nothing to commit."
+            echo "Snapshot unchanged — nothing to commit."
           else
             git commit -m "chore: update project structure snapshot [skip ci]"
             git push
