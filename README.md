@@ -1,5 +1,7 @@
 # mdix-scaffold
 
+[**Read the Docs**](https://dixscript-docs.pages.dev) | [**DixScript Core**](https://github.com/Mid-D-Man/DixScript-Rust)
+
 Declarative, idempotent project structure generator using
 [DixScript](https://github.com/Mid-D-Man/DixScript-Rust) `.mdix` files.
 
