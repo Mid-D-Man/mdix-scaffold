@@ -18,8 +18,7 @@ import sys
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers (duplicated from generate_structure.py so each script is
-# self-contained; factor out to scripts/lib.py later if desired)
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 RESERVED_PREFIXES = {
@@ -27,6 +26,8 @@ RESERVED_PREFIXES = {
     "delete_files",
     "rename_files",
     "update_files",
+    "move_files",
+    "patch_files",
 }
 
 
@@ -47,7 +48,7 @@ def resolve_hidden_set(data):
 def key_to_dir(dotted_key, hidden_set):
     if dotted_key == "root":
         return ""
-    parts = dotted_key.split(".")
+    parts    = dotted_key.split(".")
     fs_parts = []
     for idx, part in enumerate(parts):
         if idx == 0 and part in hidden_set:
@@ -133,8 +134,8 @@ def run(args):
     with open(args.structure_json) as fh:
         data = json.load(fh)
 
-    hidden_set  = resolve_hidden_set(data)
-    dir_groups  = collect_dir_groups(data)
+    hidden_set = resolve_hidden_set(data)
+    dir_groups = collect_dir_groups(data)
 
     removed = []
     missing = []
