@@ -6,55 +6,72 @@
 // ────────────────────
 //   ~f(name, ext)                      stub file (built-in content default)
 //   ~fc(name, ext, content)            file with explicit content
-//   ~fremote(name, ext, url)           file whose content is fetched from url
-//                                      at generation time and cached locally
+//   ~fremote(name, ext, url)           file fetched from URL at generation time
 //   ~gitkeep()                         .gitkeep placeholder
 //   ~hidden(segment)                   dot-prefix segment on disk
 //   ~delete_file(path)                 delete before create pass
 //   ~rename(src, dst)                  rename after deletes, before creates
-//   ~move(src, dst)                    move file/dir (cross-filesystem safe)
-//   ~update(path, content)             always-overwrite after renames/moves
+//   ~move(src, dst)                    cross-filesystem move
+//   ~update(path, content)             always-overwrite entire file
 //
 // SURGICAL PATCH OPERATIONS  (patch_files:: array, run after update pass)
 // ────────────────────────────────────────────────────────────────────────
-//   Anchor matching is whitespace-normalised — safe against indentation drift.
-//   On multiple anchor matches: warns with line numbers, applies to first match.
+//   Anchor matching: whitespace-normalised.  Multiple matches: warn + use first
+//   (or specify match_index to target the Nth occurrence, 0-based).
 //
+// ── Insert ──────────────────────────────────────────────────────────────────
 //   ~patch_insert_after(path, anchor, content)
-//       Insert `content` immediately AFTER the first line containing `anchor`.
-//       Include \n in content — the patcher does not inject newlines.
+//   ~patch_insert_after_n(path, anchor, content, match_index)
+//       Insert `content` immediately AFTER the first (or Nth) line containing
+//       `anchor`. Include \n in content — patcher does not inject newlines.
 //
 //   ~patch_insert_before(path, anchor, content)
-//       Insert `content` immediately BEFORE the first line containing `anchor`.
+//   ~patch_insert_before_n(path, anchor, content, match_index)
+//       Insert `content` immediately BEFORE the matching line.
 //
+// ── Replace ─────────────────────────────────────────────────────────────────
 //   ~patch_replace_text(path, anchor, content)
-//       Two-mode replacement:
-//         Mode 1 — anchor found as exact literal substring → replace in-place.
-//         Mode 2 — normalised line match → replace the entire matching line.
+//   ~patch_replace_text_n(path, anchor, content, match_index)
+//       Mode 1: exact literal substring → replace in-place.
+//       Mode 2: normalised line match   → replace the whole line.
 //
 //   ~patch_replace_lines(path, from_line, to_line, content)
 //       Replace lines from_line..to_line (1-indexed inclusive) with `content`.
-//       `content` may contain \n for multi-line replacements.
 //
 //   ~patch_replace_range(path, from_char, to_char, content)
-//       Replace characters [from_char, to_char) (0-indexed, exclusive end).
-//       Most precise; verify char offsets with --dry-run first.
+//       Replace characters [from_char, to_char) (0-indexed exclusive end).
+//       Most precise; verify offsets with --dry-run first.
 //
 //   ~patch_replace_fn(path, fn_name, content)
-//       Replace an entire function/method definition (signature + body).
-//       Curly-brace langs: brace-balanced detection.
-//       Python: indentation-based detection.
+//       Replace entire function/method definition (signature + body).
+//       Curly-brace langs: brace-balanced.  Python: indentation-based.
 //
-// REMOTE URL FORMATS (for fremote)
-// ─────────────────────────────────
-//   https://example.com/file.txt
-//   github://owner/repo/branch/path/to/file.ext
-//   githubhttps://owner/repo/branch/path/to/file.ext
+//   ~patch_replace_block(path, start_anchor, end_anchor, content)
+//       Replace everything from start_anchor to end_anchor (both inclusive)
+//       with content. Use patch_replace_block_keep to preserve the anchor lines.
 //
-// MAPPINGS  ([[key]] substitution in content strings)
-// ────────────────────────────────────────────────────
-//   Pass --mappings path/to/mappings.yaml to substitute [[key]] placeholders
-//   in any content string. Nested keys use dot notation: [[section.key]]
+//   ~patch_replace_block_keep(path, start_anchor, end_anchor, content)
+//       As above but the two anchor lines are kept; only the content strictly
+//       between them is replaced.
+//
+//   ~patch_replace_regex(path, pattern, content)
+//   ~patch_replace_regex_f(path, pattern, content, flags)
+//   ~patch_replace_regex_n(path, pattern, content, match_index)
+//   ~patch_replace_regex_fn(path, pattern, content, flags, match_index)
+//       Replace the Nth regex match with content (default: first match).
+//       content may use \1 \2 … for capture groups.
+//       flags: any combination of i (IGNORECASE), m (MULTILINE), s (DOTALL).
+//
+// ── Delete ──────────────────────────────────────────────────────────────────
+//   ~patch_delete_text(path, anchor)
+//   ~patch_delete_text_n(path, anchor, match_index)
+//       Remove first (or Nth) line matching anchor.
+//
+//   ~patch_delete_lines(path, from_line, to_line)
+//       Remove lines from_line..to_line (1-indexed inclusive).
+//
+//   ~patch_delete_fn(path, fn_name)
+//       Remove entire function/method definition.
 //
 // =============================================================================
 
@@ -75,15 +92,8 @@
     return { name = name, ext = ext, content = content }
   }
 
-  // File whose content is fetched from a remote URL at generation time.
-  // The generator recognises the "remote::" prefix and fetches the URL.
-  // Supported: https://, github://owner/repo/branch/path, githubhttps://...
   ~fremote<object>(name, ext, url) {
-    return {
-      name    = name
-      ext     = ext
-      content = "remote::" + url
-    }
+    return { name = name, ext = ext, content = "remote::" + url }
   }
 
   ~gitkeep<object>() {
@@ -102,8 +112,6 @@
     return { from_path = src, to_path = dst }
   }
 
-  // Cross-filesystem move; creates destination parent directories automatically.
-  // Use rename() for same-directory renames, move() for cross-directory moves.
   ~move<object>(src, dst) {
     return { from_path = src, to_path = dst }
   }
@@ -112,22 +120,52 @@
     return { path = path, content = content }
   }
 
-  // ── Surgical patch operations ─────────────────────────────────────────────
+  // ── Insert ──────────────────────────────────────────────────────────────
 
   ~patch_insert_after<object>(path, anchor, content) {
     return { path = path, op = "insert_after", anchor = anchor, content = content }
+  }
+
+  ~patch_insert_after_n<object>(path, anchor, content, match_index) {
+    return {
+      path        = path
+      op          = "insert_after"
+      anchor      = anchor
+      content     = content
+      match_index = match_index
+    }
   }
 
   ~patch_insert_before<object>(path, anchor, content) {
     return { path = path, op = "insert_before", anchor = anchor, content = content }
   }
 
-  // replace_text — Mode 1: exact literal substring; Mode 2: normalised line match
+  ~patch_insert_before_n<object>(path, anchor, content, match_index) {
+    return {
+      path        = path
+      op          = "insert_before"
+      anchor      = anchor
+      content     = content
+      match_index = match_index
+    }
+  }
+
+  // ── Replace ─────────────────────────────────────────────────────────────
+
   ~patch_replace_text<object>(path, anchor, content) {
     return { path = path, op = "replace_text", anchor = anchor, content = content }
   }
 
-  // Replace lines from_line..to_line (1-indexed, inclusive)
+  ~patch_replace_text_n<object>(path, anchor, content, match_index) {
+    return {
+      path        = path
+      op          = "replace_text"
+      anchor      = anchor
+      content     = content
+      match_index = match_index
+    }
+  }
+
   ~patch_replace_lines<object>(path, from_line, to_line, content) {
     return {
       path      = path
@@ -138,7 +176,6 @@
     }
   }
 
-  // Replace characters [from_char, to_char) (0-indexed, exclusive end)
   ~patch_replace_range<object>(path, from_char, to_char, content) {
     return {
       path      = path
@@ -149,9 +186,84 @@
     }
   }
 
-  // Replace an entire function/method definition by name
   ~patch_replace_fn<object>(path, fn_name, content) {
     return { path = path, op = "replace_function", fn_name = fn_name, content = content }
+  }
+
+  ~patch_replace_block<object>(path, start_anchor, end_anchor, content) {
+    return {
+      path         = path
+      op           = "replace_block"
+      start_anchor = start_anchor
+      end_anchor   = end_anchor
+      content      = content
+    }
+  }
+
+  // keep_anchors = "true" preserves start/end anchor lines; only content
+  // between them is replaced.
+  ~patch_replace_block_keep<object>(path, start_anchor, end_anchor, content) {
+    return {
+      path         = path
+      op           = "replace_block"
+      start_anchor = start_anchor
+      end_anchor   = end_anchor
+      content      = content
+      keep_anchors = "true"
+    }
+  }
+
+  ~patch_replace_regex<object>(path, pattern, content) {
+    return { path = path, op = "replace_regex", pattern = pattern, content = content }
+  }
+
+  ~patch_replace_regex_f<object>(path, pattern, content, flags) {
+    return {
+      path    = path
+      op      = "replace_regex"
+      pattern = pattern
+      content = content
+      flags   = flags
+    }
+  }
+
+  ~patch_replace_regex_n<object>(path, pattern, content, match_index) {
+    return {
+      path        = path
+      op          = "replace_regex"
+      pattern     = pattern
+      content     = content
+      match_index = match_index
+    }
+  }
+
+  ~patch_replace_regex_fn<object>(path, pattern, content, flags, match_index) {
+    return {
+      path        = path
+      op          = "replace_regex"
+      pattern     = pattern
+      content     = content
+      flags       = flags
+      match_index = match_index
+    }
+  }
+
+  // ── Delete ──────────────────────────────────────────────────────────────
+
+  ~patch_delete_text<object>(path, anchor) {
+    return { path = path, op = "delete_text", anchor = anchor }
+  }
+
+  ~patch_delete_text_n<object>(path, anchor, match_index) {
+    return { path = path, op = "delete_text", anchor = anchor, match_index = match_index }
+  }
+
+  ~patch_delete_lines<object>(path, from_line, to_line) {
+    return { path = path, op = "delete_lines", from_line = from_line, to_line = to_line }
+  }
+
+  ~patch_delete_fn<object>(path, fn_name) {
+    return { path = path, op = "delete_function", fn_name = fn_name }
   }
 
 )
@@ -161,106 +273,103 @@
   description  = "My project description"
   author       = "YourName"
 
-  // ── hidden_dirs ─────────────────────────────────────────────────────────
   hidden_dirs::
     hidden("vscode")
-    // hidden("github")   // ← also add to enable .github/ path resolution
 
-  // ── Example: delete, rename, move, update (uncomment to use) ────────────
-  //
+  // ── Examples (uncomment to use) ──────────────────────────────────────────
+
   // delete_files::
   //   delete_file("deprecated/old_module.rs")
-  //
+
   // rename_files::
   //   rename("src/old.rs", "src/new.rs")
-  //
+
   // move_files::
   //   move("src/utils/helper.rs", "src/core/helper.rs")
-  //   move("legacy/", "archive/legacy/")
-  //
+
   // update_files::
   //   update("src/main.rs", "fn main() {\n    println!(\"v2\");\n}\n")
 
-  // ── Example: surgical file patches (uncomment to use) ────────────────────
-  //
   // patch_files::
   //
-  //   Insert a new use statement after an existing one:
-  //   patch_insert_after("src/main.rs", "use std::io;", "use std::fs;\n")
+  //   ── Insert ────────────────────────────────────────────────────────────
+  //   patch_insert_after("src/lib.rs", "use std::io;", "use std::fs;\n")
+  //   patch_insert_before("src/lib.rs", "pub fn process(", "/// Process data.\n")
+  //   patch_insert_after_n("src/lib.rs", "use crate::", "use crate::new_mod;\n", 2)
   //
-  //   Insert a comment before a function:
-  //   patch_insert_before("src/lib.rs", "pub fn process(", "/// Process input data.\n")
-  //
-  //   Replace a specific substring (exact literal match):
+  //   ── Replace ───────────────────────────────────────────────────────────
   //   patch_replace_text("src/lib.rs", "fn old_name(", "fn new_name(")
-  //
-  //   Replace a function name but the exact text might be indented — use
-  //   whitespace-normalised fallback (replaces the whole matching line):
-  //   patch_replace_text("src/lib.rs", "pub fn legacy_api", "pub fn new_api(data: &str) -> String {")
-  //
-  //   Replace lines 10–25 with new content (1-indexed, inclusive):
+  //   patch_replace_text_n("src/lib.rs", "let x =", "let x = new_val;", 1)
   //   patch_replace_lines("src/lib.rs", 10, 25, "// replaced block\n")
-  //
-  //   Replace a specific character range (run --dry-run to find offsets):
   //   patch_replace_range("src/lib.rs", 500, 750, "// replaced range\n")
-  //
-  //   Replace an entire function definition (brace-balanced for Rust/C/JS/etc.):
   //   patch_replace_fn("src/lib.rs", "old_function",
   //     "fn old_function() -> u32 {\n    42\n}\n")
   //
-  //   Multiple patches on the same file execute in listed order:
-  //   patch_replace_fn("src/core/lib.rs", "init",
-  //     "pub fn init(cfg: &Config) -> Result<(), Error> {\n    cfg.validate()?;\n    Ok(())\n}\n")
-  //   patch_insert_after("src/core/lib.rs", "use crate::config::Config;",
-  //     "use crate::error::Error;\n")
-
-  // ── Pre/post hooks (uncomment to use) ────────────────────────────────────
-  // pre_hooks::
-  //   "echo 'Starting generation...'"
-  //   "cargo fetch"
+  //   ── Replace block (between two anchors) ───────────────────────────────
+  //   patch_replace_block("src/lib.rs",
+  //     "// BEGIN_GENERATED", "// END_GENERATED",
+  //     "// BEGIN_GENERATED\npub fn generated() {}\n// END_GENERATED\n")
   //
+  //   patch_replace_block_keep("src/lib.rs",
+  //     "// BEGIN_GENERATED", "// END_GENERATED",
+  //     "pub fn generated() {}\n")
+  //
+  //   ── Replace regex ─────────────────────────────────────────────────────
+  //   Basic (first match):
+  //   patch_replace_regex("src/main.rs", "version = \"[^\"]+\"", "version = \"2.0.0\"")
+  //
+  //   With flags:
+  //   patch_replace_regex_f("src/lib.rs", "pub fn \\w+", "pub fn renamed", "i")
+  //
+  //   Nth match (0-based):
+  //   patch_replace_regex_n("src/lib.rs", "\\btodo!\\(\\)", "unimplemented!()", 2)
+  //
+  //   Capture groups in replacement:
+  //   patch_replace_regex_f("Cargo.toml",
+  //     "(version\\s*=\\s*\")([^\"]+)(\")", "\\g<1>2.0.0\\3", "m")
+  //
+  //   ── Delete ────────────────────────────────────────────────────────────
+  //   patch_delete_text("src/lib.rs", "// TODO: remove this line")
+  //   patch_delete_text_n("src/lib.rs", "#[allow(dead_code)]", 0)
+  //   patch_delete_lines("src/lib.rs", 10, 15)
+  //   patch_delete_fn("src/lib.rs", "legacy_function")
+
+  // pre_hooks::
+  //   "cargo fetch"
+
   // post_hooks::
   //   "cargo fmt"
-  //   "echo 'Done'"
 
-  // ── VS Code ───────────────────────────────────────────────────────────────
   vscode::
     fc("extensions", "json", "{\n  \"recommendations\": []\n}\n")
     fc("settings",   "json", "{\n}\n")
 
-  // ── Source root ───────────────────────────────────────────────────────────
   src::
     fc("main", "rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")
 
-  // ── Core library modules ──────────────────────────────────────────────────
   src.core::
     f("mod",  "rs")
     f("lib",  "rs")
     f("util", "rs")
 
-  // ── Data models ───────────────────────────────────────────────────────────
   src.models::
     f("mod", "rs")
 
-  // ── Integration tests ─────────────────────────────────────────────────────
   tests::
     f("integration", "rs")
     gitkeep()
 
-  // ── Documentation ─────────────────────────────────────────────────────────
   docs::
-    fc("getting-started", "md", "# Getting started\n\nAdd setup instructions here.\n")
-    fc("architecture",    "md", "# Architecture\n\nDescribe the high-level architecture here.\n")
+    fc("getting-started", "md", "# Getting started\n")
+    fc("architecture",    "md", "# Architecture\n")
 
-  // ── Shell scripts ─────────────────────────────────────────────────────────
   scripts::
     f("build",  "sh")
     f("deploy", "sh")
 
-  // ── Repository root files ─────────────────────────────────────────────────
   root::
-    fc("README",     "md",   "# [[project_name]]\n\n[[description]]\n\n## Usage\n\nAdd usage instructions here.\n")
-    fc(".gitignore", "",     "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
+    fc("README",     "md",   "# [[project_name]]\n\n[[description]]\n")
+    fc(".gitignore", "",     "target/\ndist/\n.env\n*.log\n.DS_Store\n")
     fc("Cargo",      "toml", "[package]\nname = \"[[project_name]]\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n")
 
 )
