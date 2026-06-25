@@ -105,17 +105,21 @@ jobs:
             echo "path=/tmp/generate_structure.py" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Resolve remote + mappings libs
+      - name: Resolve support libs
         run: |
-          # Copy lib scripts alongside the generation script if local
+          # Copy lib scripts alongside the generation script if local,
+          # otherwise fetch from mdix-scaffold. Covers lib_remote, lib_mappings,
+          # and lib_patch (surgical file-patch operations).
           SCRIPT_DIR=$(dirname "${{ steps.script.outputs.path }}")
-          for lib in lib_remote.py lib_mappings.py; do
+          for lib in lib_remote.py lib_mappings.py lib_patch.py; do
             if [ -f "scripts/$lib" ]; then
               [ "$SCRIPT_DIR" != "scripts" ] && cp "scripts/$lib" "$SCRIPT_DIR/$lib"
+              echo "  local   $lib"
             else
               curl -fsSL \
                 "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/$lib" \
                 -o "$SCRIPT_DIR/$lib"
+              echo "  fetched $lib"
             fi
           done
 
@@ -153,7 +157,6 @@ jobs:
           if [ -n "$MAPPINGS" ] && [ -f "$MAPPINGS" ]; then
             echo "Converting mappings: $MAPPINGS"
             mdix validate "$MAPPINGS"
-            # lib_mappings.py will call mdix convert itself — just validate here
             echo "Mappings file validated."
           elif [ -n "$MAPPINGS" ]; then
             echo "::warning::Mappings file specified but not found: $MAPPINGS"
