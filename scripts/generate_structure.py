@@ -2,7 +2,7 @@
 """
 Generate project structure from a .mdix template.
 
-Features (v3):
+Features (v4):
   - File strategies : skip (default), overwrite, backup, rename
   - Pre/post hooks  : shell commands from pre_hooks:: / post_hooks:: in @DATA
   - Diff preview    : --diff shows unified diffs alongside --dry-run
@@ -10,6 +10,9 @@ Features (v3):
                       Supports https://, http://, github://owner/repo/branch/path
   - Mappings        : --mappings <file.yaml> replaces [[key]] placeholders in content
   - Cache           : remote files cached in ~/.mdix-scaffold/cache/
+  - Move files      : move_files:: moves files/dirs (cross-filesystem safe)
+  - Patch files     : patch_files:: surgically edits existing files (insert,
+                      replace_text, replace_lines, replace_range, replace_function)
 
 Usage (local):
   python3 scripts/generate_structure.py
@@ -51,7 +54,6 @@ try:
     _HAS_REMOTE   = True
     _HAS_MAPPINGS = True
 except ImportError:
-    # Graceful degradation — remote/mappings features disabled but core works
     _HAS_REMOTE   = False
     _HAS_MAPPINGS = False
     def resolve_content(c, verbose=False): return c  # type: ignore
@@ -59,6 +61,12 @@ except ImportError:
     def load_mappings(p): return {}                   # type: ignore
     def apply_mappings(c, m): return c                # type: ignore
     def list_placeholders(c): return []               # type: ignore
+
+try:
+    import lib_patch
+    _HAS_PATCH = True
+except ImportError:
+    _HAS_PATCH = False
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +148,8 @@ def parse_args():
     )
 
     args = p.parse_args()
-
     if args.override_stubs:
         args.file_strategy = "overwrite"
-
     return args
 
 
@@ -182,7 +188,8 @@ STUB_DEFAULTS = {
 
 RESERVED_PREFIXES = {
     "hidden_dirs", "delete_files", "rename_files",
-    "update_files", "pre_hooks", "post_hooks",
+    "update_files", "pre_hooks",   "post_hooks",
+    "move_files",   "patch_files",
 }
 
 
@@ -193,7 +200,7 @@ RESERVED_PREFIXES = {
 def key_to_dir(dotted_key, hidden_set):
     if dotted_key == "root":
         return ""
-    parts = dotted_key.split(".")
+    parts    = dotted_key.split(".")
     fs_parts = []
     for idx, part in enumerate(parts):
         if idx == 0 and part in hidden_set:
@@ -361,16 +368,12 @@ def process_content(raw_content, name_part, ext_part, mappings, args):
       2. Resolve remote:: references
       3. Apply [[key]] mappings substitution
     """
-    # Step 1: stub default
     if raw_content == "":
         raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
 
-    # Step 2: remote content
     if _HAS_REMOTE:
-        use_cache = not getattr(args, "no_cache", False)
         raw_content = resolve_content(raw_content, verbose=args.verbose)
 
-    # Step 3: mappings
     if mappings and _HAS_MAPPINGS:
         placeholders = list_placeholders(raw_content)
         if placeholders and args.verbose:
@@ -389,7 +392,7 @@ def process_content(raw_content, name_part, ext_part, mappings, args):
 def write_manifest(
     template_path,
     previously_created,
-    created, overridden, updated, deleted, renamed, skipped,
+    created, overridden, updated, deleted, renamed, moved, skipped,
     dry_run,
 ):
     if dry_run:
@@ -405,6 +408,9 @@ def write_manifest(
     all_tracked = previously_created | set(created) | set(overridden) | set(updated)
     all_tracked -= set(deleted)
     for from_p, to_p in renamed:
+        all_tracked.discard(from_p)
+        all_tracked.add(to_p)
+    for from_p, to_p in moved:
         all_tracked.discard(from_p)
         all_tracked.add(to_p)
     all_tracked = sorted(all_tracked)
@@ -431,6 +437,7 @@ def write_manifest(
         f'  skipped       = {len(skipped)}\n'
         f'  deleted       = {len(deleted)}\n'
         f'  renamed       = {len(renamed)}\n'
+        f'  moved         = {len(moved)}\n'
         f'  updated       = {len(updated)}\n'
         "\n"
         "  created_files::\n"
@@ -448,7 +455,6 @@ def write_manifest(
 # ---------------------------------------------------------------------------
 
 def run(args):
-    # Handle --clear-cache early
     if args.clear_cache:
         clear_cache()
         sys.exit(0)
@@ -471,7 +477,6 @@ def run(args):
     post_hooks         = collect_string_array(data, "post_hooks")
     project_name       = data.get("project_name", "unknown-project")
 
-    # Load mappings
     mappings = {}
     if args.mappings:
         if _HAS_MAPPINGS:
@@ -496,6 +501,7 @@ def run(args):
     print(f"Dry run        : {args.dry_run}")
     print(f"Remote content : {_HAS_REMOTE}")
     print(f"Mappings       : {bool(mappings)}")
+    print(f"Patch support  : {_HAS_PATCH}")
     if previously_created:
         print(f"Manifest       : {len(previously_created)} previously tracked file(s)")
     if pre_hooks:
@@ -519,7 +525,7 @@ def run(args):
     # ------------------------------------------------------------------
     # PASS 1 — Delete files / directories
     # ------------------------------------------------------------------
-    deleted = []
+    deleted      = []
     header_shown = False
     i = 0
     while True:
@@ -547,7 +553,7 @@ def run(args):
     # ------------------------------------------------------------------
     # PASS 2 — Rename files / directories
     # ------------------------------------------------------------------
-    renamed = []
+    renamed      = []
     header_shown = False
     i = 0
     while True:
@@ -577,6 +583,38 @@ def run(args):
         i += 1
 
     # ------------------------------------------------------------------
+    # PASS 2b — Move files / directories  (cross-filesystem safe)
+    # ------------------------------------------------------------------
+    moved        = []
+    header_shown = False
+    i = 0
+    while True:
+        key = f"move_files[{i}]"
+        if key not in data:
+            break
+        entry = data[key]
+        if isinstance(entry, dict) and "from_path" in entry and "to_path" in entry:
+            from_path = entry["from_path"].strip()
+            to_path   = entry["to_path"].strip()
+            if from_path and to_path:
+                if not header_shown:
+                    print()
+                    print("=== Moving files / directories ===")
+                    print()
+                    header_shown = True
+                if os.path.exists(from_path):
+                    if not args.dry_run:
+                        parent = os.path.dirname(to_path)
+                        if parent:
+                            os.makedirs(parent, exist_ok=True)
+                        shutil.move(from_path, to_path)
+                    moved.append((from_path, to_path))
+                    print(f"  MOV  {from_path} → {to_path}")
+                else:
+                    print(f"  ---  {from_path}  (not found, skipped)")
+        i += 1
+
+    # ------------------------------------------------------------------
     # PASS 3 — Create / skip / override scaffold files
     # ------------------------------------------------------------------
     created    = []
@@ -597,8 +635,8 @@ def run(args):
             print(f"  DIR  {dir_path}/")
 
         for idx in sorted(items.keys()):
-            entry    = items[idx]
-            filename = assemble_filename(entry)
+            entry        = items[idx]
+            filename     = assemble_filename(entry)
             if not filename:
                 continue
 
@@ -606,10 +644,8 @@ def run(args):
             ext_part    = entry.get("ext",  "")
             raw_content = entry.get("content", "")
 
-            # Full content pipeline: stub → remote → mappings
             final_content = process_content(raw_content, name_part, ext_part, mappings, args)
-
-            filepath = os.path.join(dir_path, filename) if dir_path else filename
+            filepath      = os.path.join(dir_path, filename) if dir_path else filename
 
             if os.path.exists(filepath):
                 label, should_write = handle_existing_file(filepath, final_content, args)
@@ -635,7 +671,7 @@ def run(args):
     # ------------------------------------------------------------------
     # PASS 4 — Update file contents (always-overwrite)
     # ------------------------------------------------------------------
-    updated = []
+    updated      = []
     header_shown = False
     i = 0
     while True:
@@ -653,7 +689,6 @@ def run(args):
                     print()
                     header_shown = True
 
-                # Apply remote + mappings to update content too
                 new_content = process_content(new_content, "", "", mappings, args)
 
                 if args.diff and os.path.exists(file_path):
@@ -680,6 +715,43 @@ def run(args):
         i += 1
 
     # ------------------------------------------------------------------
+    # PASS 5 — Surgical file patches
+    # ------------------------------------------------------------------
+    patched      = []
+    patch_errors = []
+    header_shown = False
+    i = 0
+    while True:
+        key = f"patch_files[{i}]"
+        if key not in data:
+            break
+        entry = data[key]
+        if isinstance(entry, dict) and "path" in entry and "op" in entry:
+            file_path = entry["path"].strip()
+            op_type   = entry.get("op", "").strip()
+            if file_path and op_type:
+                if not header_shown:
+                    print()
+                    print("=== Patching file contents ===")
+                    print()
+                    header_shown = True
+
+                if not _HAS_PATCH:
+                    print(
+                        f"  ---  {file_path}  "
+                        f"(lib_patch.py not found — skipped [{op_type}])"
+                    )
+                else:
+                    ok = lib_patch.apply_patch(file_path, entry, dry_run=args.dry_run)
+                    if ok:
+                        patched.append(file_path)
+                        print(f"  PCH  {file_path}  ({op_type})")
+                    else:
+                        patch_errors.append(file_path)
+                        # specific error already printed by lib_patch
+        i += 1
+
+    # ------------------------------------------------------------------
     # Post-hooks
     # ------------------------------------------------------------------
     if post_hooks:
@@ -700,6 +772,7 @@ def run(args):
         updated=updated,
         deleted=deleted,
         renamed=renamed,
+        moved=moved,
         skipped=skipped,
         dry_run=args.dry_run,
     )
@@ -711,7 +784,11 @@ def run(args):
     print(f"  skipped    : {len(skipped)}")
     print(f"  deleted    : {len(deleted)}")
     print(f"  renamed    : {len(renamed)}")
+    print(f"  moved      : {len(moved)}")
     print(f"  updated    : {len(updated)}")
+    print(f"  patched    : {len(patched)}")
+    if patch_errors:
+        print(f"  patch_err  : {len(patch_errors)}")
     print("=" * 56)
 
     if args.dry_run:
