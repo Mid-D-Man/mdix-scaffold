@@ -12,7 +12,38 @@
 //   ~hidden(segment)                   dot-prefix segment on disk
 //   ~delete_file(path)                 delete before create pass
 //   ~rename(src, dst)                  rename after deletes, before creates
-//   ~update(path, content)             always-overwrite after renames
+//   ~move(src, dst)                    move file/dir (cross-filesystem safe)
+//   ~update(path, content)             always-overwrite after renames/moves
+//
+// SURGICAL PATCH OPERATIONS  (patch_files:: array, run after update pass)
+// ────────────────────────────────────────────────────────────────────────
+//   Anchor matching is whitespace-normalised — safe against indentation drift.
+//   On multiple anchor matches: warns with line numbers, applies to first match.
+//
+//   ~patch_insert_after(path, anchor, content)
+//       Insert `content` immediately AFTER the first line containing `anchor`.
+//       Include \n in content — the patcher does not inject newlines.
+//
+//   ~patch_insert_before(path, anchor, content)
+//       Insert `content` immediately BEFORE the first line containing `anchor`.
+//
+//   ~patch_replace_text(path, anchor, content)
+//       Two-mode replacement:
+//         Mode 1 — anchor found as exact literal substring → replace in-place.
+//         Mode 2 — normalised line match → replace the entire matching line.
+//
+//   ~patch_replace_lines(path, from_line, to_line, content)
+//       Replace lines from_line..to_line (1-indexed inclusive) with `content`.
+//       `content` may contain \n for multi-line replacements.
+//
+//   ~patch_replace_range(path, from_char, to_char, content)
+//       Replace characters [from_char, to_char) (0-indexed, exclusive end).
+//       Most precise; verify char offsets with --dry-run first.
+//
+//   ~patch_replace_fn(path, fn_name, content)
+//       Replace an entire function/method definition (signature + body).
+//       Curly-brace langs: brace-balanced detection.
+//       Python: indentation-based detection.
 //
 // REMOTE URL FORMATS (for fremote)
 // ─────────────────────────────────
@@ -71,8 +102,56 @@
     return { from_path = src, to_path = dst }
   }
 
+  // Cross-filesystem move; creates destination parent directories automatically.
+  // Use rename() for same-directory renames, move() for cross-directory moves.
+  ~move<object>(src, dst) {
+    return { from_path = src, to_path = dst }
+  }
+
   ~update<object>(path, content) {
     return { path = path, content = content }
+  }
+
+  // ── Surgical patch operations ─────────────────────────────────────────────
+
+  ~patch_insert_after<object>(path, anchor, content) {
+    return { path = path, op = "insert_after", anchor = anchor, content = content }
+  }
+
+  ~patch_insert_before<object>(path, anchor, content) {
+    return { path = path, op = "insert_before", anchor = anchor, content = content }
+  }
+
+  // replace_text — Mode 1: exact literal substring; Mode 2: normalised line match
+  ~patch_replace_text<object>(path, anchor, content) {
+    return { path = path, op = "replace_text", anchor = anchor, content = content }
+  }
+
+  // Replace lines from_line..to_line (1-indexed, inclusive)
+  ~patch_replace_lines<object>(path, from_line, to_line, content) {
+    return {
+      path      = path
+      op        = "replace_lines"
+      from_line = from_line
+      to_line   = to_line
+      content   = content
+    }
+  }
+
+  // Replace characters [from_char, to_char) (0-indexed, exclusive end)
+  ~patch_replace_range<object>(path, from_char, to_char, content) {
+    return {
+      path      = path
+      op        = "replace_range"
+      from_char = from_char
+      to_char   = to_char
+      content   = content
+    }
+  }
+
+  // Replace an entire function/method definition by name
+  ~patch_replace_fn<object>(path, fn_name, content) {
+    return { path = path, op = "replace_function", fn_name = fn_name, content = content }
   }
 
 )
@@ -87,7 +166,7 @@
     hidden("vscode")
     // hidden("github")   // ← also add to enable .github/ path resolution
 
-  // ── Example: delete, rename, update (uncomment to use) ──────────────────
+  // ── Example: delete, rename, move, update (uncomment to use) ────────────
   //
   // delete_files::
   //   delete_file("deprecated/old_module.rs")
@@ -95,13 +174,47 @@
   // rename_files::
   //   rename("src/old.rs", "src/new.rs")
   //
+  // move_files::
+  //   move("src/utils/helper.rs", "src/core/helper.rs")
+  //   move("legacy/", "archive/legacy/")
+  //
   // update_files::
   //   update("src/main.rs", "fn main() {\n    println!(\"v2\");\n}\n")
 
-  // ── Pre/post hooks (uncomment to use) ────────────────────────────────────
-  // Shell commands run before and after file generation.
-  // Pre-hook failure aborts generation. Post-hook failure prints a warning.
+  // ── Example: surgical file patches (uncomment to use) ────────────────────
   //
+  // patch_files::
+  //
+  //   Insert a new use statement after an existing one:
+  //   patch_insert_after("src/main.rs", "use std::io;", "use std::fs;\n")
+  //
+  //   Insert a comment before a function:
+  //   patch_insert_before("src/lib.rs", "pub fn process(", "/// Process input data.\n")
+  //
+  //   Replace a specific substring (exact literal match):
+  //   patch_replace_text("src/lib.rs", "fn old_name(", "fn new_name(")
+  //
+  //   Replace a function name but the exact text might be indented — use
+  //   whitespace-normalised fallback (replaces the whole matching line):
+  //   patch_replace_text("src/lib.rs", "pub fn legacy_api", "pub fn new_api(data: &str) -> String {")
+  //
+  //   Replace lines 10–25 with new content (1-indexed, inclusive):
+  //   patch_replace_lines("src/lib.rs", 10, 25, "// replaced block\n")
+  //
+  //   Replace a specific character range (run --dry-run to find offsets):
+  //   patch_replace_range("src/lib.rs", 500, 750, "// replaced range\n")
+  //
+  //   Replace an entire function definition (brace-balanced for Rust/C/JS/etc.):
+  //   patch_replace_fn("src/lib.rs", "old_function",
+  //     "fn old_function() -> u32 {\n    42\n}\n")
+  //
+  //   Multiple patches on the same file execute in listed order:
+  //   patch_replace_fn("src/core/lib.rs", "init",
+  //     "pub fn init(cfg: &Config) -> Result<(), Error> {\n    cfg.validate()?;\n    Ok(())\n}\n")
+  //   patch_insert_after("src/core/lib.rs", "use crate::config::Config;",
+  //     "use crate::error::Error;\n")
+
+  // ── Pre/post hooks (uncomment to use) ────────────────────────────────────
   // pre_hooks::
   //   "echo 'Starting generation...'"
   //   "cargo fetch"
@@ -149,16 +262,5 @@
     fc("README",     "md",   "# [[project_name]]\n\n[[description]]\n\n## Usage\n\nAdd usage instructions here.\n")
     fc(".gitignore", "",     "target/\ndist/\n.env\n*.log\n.DS_Store\n**/.DS_Store\n")
     fc("Cargo",      "toml", "[package]\nname = \"[[project_name]]\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n")
-
-  // ── Remote content examples (uncomment to use) ───────────────────────────
-  // These fetch content from the internet at generation time (cached locally).
-  //
-  // root::
-  //   fremote("LICENSE", "",
-  //     "https://raw.githubusercontent.com/nicklockwood/MIT-License/master/MIT-License")
-  //   fremote(".gitignore-rust", "",
-  //     "github://github/gitignore/main/Rust.gitignore")
-  //   fremote("cliff", "toml",
-  //     "github://Mid-D-Man/mdix-scaffold/main/.mdix/project_structure/templates/snippets/cliff.toml")
 
 )
