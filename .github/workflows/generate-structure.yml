@@ -20,7 +20,7 @@ on:
         required: false
         default: 'skip'
       mappings_file:
-        description: 'Path to .mdix mappings file for [[key]] substitution (leave blank to skip)'
+        description: 'Path to mappings file for [[key]] substitution (leave blank to skip)'
         required: false
         default: ''
   push:
@@ -29,7 +29,6 @@ on:
   workflow_call:
     inputs:
       template:
-        description: 'Path to .mdix template'
         required: false
         type: string
         default: '.mdix/project_structure/project_structure.mdix'
@@ -96,9 +95,9 @@ jobs:
         run: |
           if [ -f "scripts/generate_structure.py" ]; then
             echo "path=scripts/generate_structure.py" >> "$GITHUB_OUTPUT"
-            echo "Using local script from repo."
+            echo "Using local script."
           else
-            echo "Local script not found — fetching from mdix-scaffold..."
+            echo "Not found locally — fetching from mdix-scaffold..."
             curl -fsSL \
               "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/generate_structure.py" \
               -o /tmp/generate_structure.py
@@ -107,19 +106,22 @@ jobs:
 
       - name: Resolve support libs
         run: |
-          # Copy lib scripts alongside the generation script if local,
-          # otherwise fetch from mdix-scaffold. Covers lib_remote, lib_mappings,
-          # and lib_patch (surgical file-patch operations).
+          # For each support lib: use the local copy if present, otherwise
+          # try fetching from the remote repo.  Fetch failures are non-fatal
+          # because generate_structure.py has graceful fallbacks for all libs.
           SCRIPT_DIR=$(dirname "${{ steps.script.outputs.path }}")
           for lib in lib_remote.py lib_mappings.py lib_patch.py; do
             if [ -f "scripts/$lib" ]; then
-              [ "$SCRIPT_DIR" != "scripts" ] && cp "scripts/$lib" "$SCRIPT_DIR/$lib"
+              if [ "$SCRIPT_DIR" != "scripts" ]; then
+                cp "scripts/$lib" "$SCRIPT_DIR/$lib"
+              fi
               echo "  local   $lib"
             else
               curl -fsSL \
                 "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/$lib" \
-                -o "$SCRIPT_DIR/$lib"
-              echo "  fetched $lib"
+                -o "$SCRIPT_DIR/$lib" \
+                || echo "  WARNING: could not fetch $lib — running without it"
+              [ -f "$SCRIPT_DIR/$lib" ] && echo "  fetched $lib"
             fi
           done
 
@@ -139,7 +141,7 @@ jobs:
           import json
           d = json.load(open('/tmp/structure.json'))
           for k in sorted(d.keys()):
-              print(f'  {k} = {str(d[k])[:60]}')
+              print(f'  {k} = {str(d[k])[:80]}')
           "
 
       - name: Convert manifest to JSON (if exists)
@@ -151,13 +153,13 @@ jobs:
             echo "No manifest found — first run."
           fi
 
-      - name: Convert mappings to JSON (if provided)
+      - name: Convert mappings (if provided)
         run: |
           MAPPINGS="${{ inputs.mappings_file || '' }}"
           if [ -n "$MAPPINGS" ] && [ -f "$MAPPINGS" ]; then
-            echo "Converting mappings: $MAPPINGS"
+            echo "Validating mappings: $MAPPINGS"
             mdix validate "$MAPPINGS"
-            echo "Mappings file validated."
+            echo "Mappings validated."
           elif [ -n "$MAPPINGS" ]; then
             echo "::warning::Mappings file specified but not found: $MAPPINGS"
           else
@@ -186,6 +188,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git diff --staged --quiet \
-            && echo "Nothing new to commit — structure is up to date." \
+            && echo "Nothing to commit — structure is up to date." \
             || git commit -m "chore: sync project structure from template [skip ci]"
           git push
