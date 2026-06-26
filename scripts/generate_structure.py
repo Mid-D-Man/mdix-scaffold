@@ -2,29 +2,6 @@
 #!/usr/bin/env python3
 """
 Generate project structure from a .mdix template.
-
-Features (v4):
-  - File strategies : skip (default), overwrite, backup, rename
-  - Pre/post hooks  : shell commands from pre_hooks:: / post_hooks:: in @DATA
-  - Diff preview    : --diff shows unified diffs alongside --dry-run
-  - Remote content  : file entries whose content starts with remote:: are fetched
-                      Supports https://, http://, github://owner/repo/branch/path
-  - Mappings        : --mappings <file.yaml> replaces [[key]] placeholders in content
-  - Cache           : remote files cached in ~/.mdix-scaffold/cache/
-  - Move files      : move_files:: moves files/dirs (cross-filesystem safe)
-  - Patch files     : patch_files:: surgically edits existing files (insert,
-                      replace_text, replace_lines, replace_range, replace_function)
-
-Usage (local):
-  python3 scripts/generate_structure.py
-  python3 scripts/generate_structure.py --dry-run
-  python3 scripts/generate_structure.py --dry-run --diff
-  python3 scripts/generate_structure.py --file-strategy backup --backup /tmp/bak
-  python3 scripts/generate_structure.py --mappings mappings.yaml
-
-GitHub Actions env vars (backward compat):
-  TEMPLATE_PATH, OVERRIDE_STUBS, DRY_RUN, FILE_STRATEGY, STRUCTURE_JSON,
-  MANIFEST_JSON, MAPPINGS_FILE, BACKUP_DIR
 """
 
 import argparse
@@ -39,10 +16,6 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# ---------------------------------------------------------------------------
-# Optional local libs
-# ---------------------------------------------------------------------------
-
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
@@ -55,11 +28,11 @@ try:
 except ImportError:
     _HAS_REMOTE   = False
     _HAS_MAPPINGS = False
-    def resolve_content(c, verbose=False): return c  # type: ignore
-    def clear_cache(): pass                           # type: ignore
-    def load_mappings(p): return {}                   # type: ignore
-    def apply_mappings(c, m): return c                # type: ignore
-    def list_placeholders(c): return []               # type: ignore
+    def resolve_content(c, verbose=False): return c
+    def clear_cache(): pass
+    def load_mappings(p): return {}
+    def apply_mappings(c, m): return c
+    def list_placeholders(c): return []
 
 try:
     import lib_patch
@@ -68,93 +41,35 @@ except ImportError:
     _HAS_PATCH = False
 
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Generate project structure from a .mdix template.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument(
-        "--template", "-t",
+    p = argparse.ArgumentParser(description="Generate project structure from a .mdix template.")
+    p.add_argument("--template", "-t",
         default=os.environ.get("TEMPLATE_PATH",
-                               ".mdix/project_structure/project_structure.mdix"),
-        help="Path to the .mdix template",
-    )
-    p.add_argument(
-        "--override-stubs",
-        action="store_true",
-        default=os.environ.get("OVERRIDE_STUBS", "false").lower() == "true",
-        help="Alias for --file-strategy overwrite",
-    )
-    p.add_argument(
-        "--file-strategy",
+                               ".mdix/project_structure/project_structure.mdix"))
+    p.add_argument("--override-stubs", action="store_true",
+        default=os.environ.get("OVERRIDE_STUBS", "false").lower() == "true")
+    p.add_argument("--file-strategy",
         choices=["skip", "overwrite", "backup", "rename"],
-        default=os.environ.get("FILE_STRATEGY", "skip"),
-        help="How to handle existing files (default: skip)",
-    )
-    p.add_argument(
-        "--backup",
-        default=os.environ.get("BACKUP_DIR"),
-        help="Backup directory when --file-strategy=backup",
-    )
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=os.environ.get("DRY_RUN", "false").lower() == "true",
-        help="Preview actions without writing anything",
-    )
-    p.add_argument(
-        "--diff",
-        action="store_true",
-        default=False,
-        help="Show unified diffs alongside --dry-run",
-    )
-    p.add_argument(
-        "--mappings", "-m",
-        default=os.environ.get("MAPPINGS_FILE"),
-        help="Path to a YAML/JSON mappings file for [[key]] substitution",
-    )
-    p.add_argument(
-        "--structure-json",
-        default=os.environ.get("STRUCTURE_JSON", "/tmp/structure.json"),
-        help="Path to converted structure JSON",
-    )
-    p.add_argument(
-        "--manifest-json",
-        default=os.environ.get("MANIFEST_JSON", "/tmp/manifest.json"),
-        help="Path to existing manifest JSON, if any",
-    )
-    p.add_argument(
-        "--clear-cache",
-        action="store_true",
-        default=False,
-        help="Clear the remote-content cache and exit",
-    )
-    p.add_argument(
-        "--no-cache",
-        action="store_true",
-        default=False,
-        help="Skip cache reads/writes for remote content",
-    )
-    p.add_argument(
-        "--verbose",
-        action="store_true",
-        default=os.environ.get("VERBOSE", "false").lower() == "true",
-        help="Print extra detail (remote fetches, mapping substitutions)",
-    )
+        default=os.environ.get("FILE_STRATEGY", "skip"))
+    p.add_argument("--backup", default=os.environ.get("BACKUP_DIR"))
+    p.add_argument("--dry-run", action="store_true",
+        default=os.environ.get("DRY_RUN", "false").lower() == "true")
+    p.add_argument("--diff", action="store_true", default=False)
+    p.add_argument("--mappings", "-m", default=os.environ.get("MAPPINGS_FILE"))
+    p.add_argument("--structure-json",
+        default=os.environ.get("STRUCTURE_JSON", "/tmp/structure.json"))
+    p.add_argument("--manifest-json",
+        default=os.environ.get("MANIFEST_JSON", "/tmp/manifest.json"))
+    p.add_argument("--clear-cache", action="store_true", default=False)
+    p.add_argument("--no-cache",    action="store_true", default=False)
+    p.add_argument("--verbose", action="store_true",
+        default=os.environ.get("VERBOSE", "false").lower() == "true")
 
     args = p.parse_args()
     if args.override_stubs:
         args.file_strategy = "overwrite"
     return args
 
-
-# ---------------------------------------------------------------------------
-# Built-in stub defaults
-# ---------------------------------------------------------------------------
 
 STUB_DEFAULTS = {
     "rs":     "// Auto-generated stub\n",
@@ -193,24 +108,16 @@ RESERVED_PREFIXES = {
 
 
 # ---------------------------------------------------------------------------
-# *** THE FIX ***
-# iter_section — handles BOTH JSON formats emitted by the DixScript compiler:
-#
-#   Array format  (new):  {"delete_files": [{...}, {...}]}
+# iter_section — handles BOTH JSON formats from the DixScript compiler:
+#   Array format  (new):  {"delete_files": [{...}, ...]}
 #   Flat-indexed  (old):  {"delete_files[0]": {...}, "delete_files[1]": {...}}
-#
-# The DixScript compiler emits the array format for reserved sections.
-# The flat-indexed format is kept for backward compatibility.
 # ---------------------------------------------------------------------------
 
 def iter_section(data, prefix):
-    """Yield each item in a reserved section regardless of JSON format."""
     val = data.get(prefix)
     if isinstance(val, list):
-        # Array format: {"delete_files": [{...}, ...]}
         yield from val
         return
-    # Flat-indexed format: {"delete_files[0]": {...}, "delete_files[1]": {...}, ...}
     i = 0
     while True:
         key = f"{prefix}[{i}]"
@@ -221,7 +128,6 @@ def iter_section(data, prefix):
 
 
 def iter_string_section(data, prefix):
-    """Yield each string item in a hooks section (string array variant)."""
     val = data.get(prefix)
     if isinstance(val, list):
         for item in val:
@@ -242,10 +148,6 @@ def iter_string_section(data, prefix):
             yield v["value"]
         i += 1
 
-
-# ---------------------------------------------------------------------------
-# Data helpers
-# ---------------------------------------------------------------------------
 
 def key_to_dir(dotted_key, hidden_set):
     if dotted_key == "root":
@@ -302,16 +204,15 @@ def collect_string_array(data, prefix):
 def load_manifest(manifest_json_path):
     previously_created = set()
     if os.path.exists(manifest_json_path):
-        with open(manifest_json_path) as fh:
-            mdata = json.load(fh)
-        for entry in iter_string_section(mdata, "created_files"):
-            previously_created.add(entry)
+        try:
+            with open(manifest_json_path) as fh:
+                mdata = json.load(fh)
+            for entry in iter_string_section(mdata, "created_files"):
+                previously_created.add(entry)
+        except Exception as e:
+            print(f"  WARNING: could not read manifest ({e}) — treating as first run.")
     return previously_created
 
-
-# ---------------------------------------------------------------------------
-# Hook runner
-# ---------------------------------------------------------------------------
 
 def run_hooks(hooks, hook_type="pre", dry_run=False):
     if not hooks:
@@ -327,17 +228,11 @@ def run_hooks(hooks, hook_type="pre", dry_run=False):
         if result.stderr.strip():
             print(f"           stderr: {result.stderr.strip()}")
         if result.returncode != 0:
-            print(
-                f"  ERROR: {hook_type}-hook failed (exit {result.returncode}): {cmd}",
-                file=sys.stderr,
-            )
+            print(f"  ERROR: {hook_type}-hook failed (exit {result.returncode}): {cmd}",
+                  file=sys.stderr)
             return False
     return True
 
-
-# ---------------------------------------------------------------------------
-# File strategy
-# ---------------------------------------------------------------------------
 
 def handle_existing_file(filepath, new_content, args):
     strategy = args.file_strategy
@@ -362,10 +257,8 @@ def handle_existing_file(filepath, new_content, args):
 
     if strategy == "backup":
         if not args.backup:
-            print(
-                "  WARNING: --file-strategy=backup requires --backup <dir>; skipping",
-                file=sys.stderr,
-            )
+            print("  WARNING: --file-strategy=backup requires --backup <dir>; skipping",
+                  file=sys.stderr)
             return "skipped (no backup dir)", False
         os.makedirs(args.backup, exist_ok=True)
         backup_dest = os.path.join(args.backup, os.path.basename(filepath))
@@ -381,10 +274,6 @@ def handle_existing_file(filepath, new_content, args):
 
     return "overwritten", True
 
-
-# ---------------------------------------------------------------------------
-# Content pipeline
-# ---------------------------------------------------------------------------
 
 def process_content(raw_content, name_part, ext_part, mappings, args):
     if raw_content == "":
@@ -403,10 +292,6 @@ def process_content(raw_content, name_part, ext_part, mappings, args):
 
     return raw_content
 
-
-# ---------------------------------------------------------------------------
-# Manifest writer
-# ---------------------------------------------------------------------------
 
 def write_manifest(
     template_path,
@@ -436,35 +321,40 @@ def write_manifest(
 
     files_block = (
         "\n    ".join(f'"{p}"' for p in all_tracked)
-        if all_tracked else '"(none)"'
+        if all_tracked else ""
     )
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    manifest = f"""\
-@CONFIG(
-  version    -> "1.0.0"
-  author     -> "mdix-scaffold"
-  features   -> "data"
-  debug_mode -> "regular"
-)
 
-@DATA(
-  meta::
-    fc("template",      "", "{template_path}")
-    fc("template_hash", "", "{template_hash}")
-    fc("generated_at",  "", "{ts}")
+    # No @QUICKFUNCS, no fc() calls, no features line (defaults to advanced).
+    # Plain key=value metadata + bare string list — safe to re-parse on any run.
+    manifest_content = (
+        "@CONFIG(\n"
+        f'  version    -> "1.0.0"\n'
+        f'  generated  -> "{ts}"\n'
+        f'  debug_mode -> "off"\n'
+        ")\n\n"
+        "@DATA(\n"
+        f'  template      = "{template_path}"\n'
+        f'  template_hash = "{template_hash}"\n'
+        f'  last_run      = "{ts}"\n'
+        f'  new_this_run  = {len(created)}\n'
+        f'  overridden    = {len(overridden)}\n'
+        f'  skipped       = {len(skipped)}\n'
+        f'  deleted       = {len(deleted)}\n'
+        f'  renamed       = {len(renamed)}\n'
+        f'  moved         = {len(moved)}\n'
+        f'  updated       = {len(updated)}\n'
+        "\n"
+        "  created_files::\n"
+        f"    {files_block}\n"
+        ")\n"
+    )
 
-  created_files::
-    {files_block}
-)
-"""
-    with open(".mdix/.manifest.mdix", "w") as fh:
-        fh.write(manifest)
+    with open(".mdix/.manifest.mdix", "w") as mf:
+        mf.write(manifest_content)
+    print(f"\n  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def run(args):
     if args.clear_cache:
@@ -493,7 +383,6 @@ def run(args):
     print()
     print(f"Template defines {len(dir_groups)} directory group(s)")
 
-    # Pre-hooks
     if pre_hooks:
         print()
         print("=== Pre-hooks ===")
@@ -629,10 +518,9 @@ def run(args):
             if not filename:
                 continue
 
-            name_part   = entry.get("name", "")
-            ext_part    = entry.get("ext",  "")
-            raw_content = entry.get("content", "")
-
+            name_part     = entry.get("name", "")
+            ext_part      = entry.get("ext",  "")
+            raw_content   = entry.get("content", "")
             final_content = process_content(raw_content, name_part, ext_part, mappings, args)
             filepath      = os.path.join(dir_path, filename) if dir_path else filename
 
@@ -658,7 +546,7 @@ def run(args):
                 print(f"  NEW  {filepath}")
 
     # ------------------------------------------------------------------
-    # PASS 4 — Update file contents (always-overwrite)
+    # PASS 4 — Update file contents (always-overwrite, creates if missing)
     # ------------------------------------------------------------------
     updated      = []
     header_shown = False
@@ -719,10 +607,7 @@ def run(args):
             header_shown = True
 
         if not _HAS_PATCH:
-            print(
-                f"  ---  {file_path}  "
-                f"(lib_patch.py not found — skipped [{op_type}])"
-            )
+            print(f"  ---  {file_path}  (lib_patch.py not found — skipped [{op_type}])")
         else:
             ok = lib_patch.apply_patch(file_path, entry, dry_run=args.dry_run)
             if ok:
@@ -731,7 +616,6 @@ def run(args):
             else:
                 patch_errors.append(file_path)
 
-    # Post-hooks
     if post_hooks:
         print()
         print("=== Post-hooks ===")
@@ -739,7 +623,6 @@ def run(args):
         if not run_hooks(post_hooks, "post", args.dry_run):
             print("WARNING: post-hook failed.", file=sys.stderr)
 
-    # Manifest + summary
     write_manifest(
         template_path=args.template,
         previously_created=previously_created,
