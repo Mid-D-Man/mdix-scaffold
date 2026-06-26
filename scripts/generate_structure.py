@@ -1,3 +1,4 @@
+# scripts/generate_structure.py
 #!/usr/bin/env python3
 """
 Generate project structure from a .mdix template.
@@ -20,7 +21,6 @@ Usage (local):
   python3 scripts/generate_structure.py --dry-run --diff
   python3 scripts/generate_structure.py --file-strategy backup --backup /tmp/bak
   python3 scripts/generate_structure.py --mappings mappings.yaml
-  python3 scripts/generate_structure.py --clear-cache
 
 GitHub Actions env vars (backward compat):
   TEMPLATE_PATH, OVERRIDE_STUBS, DRY_RUN, FILE_STRATEGY, STRUCTURE_JSON,
@@ -40,8 +40,7 @@ import time
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
-# Optional local libs — resolve relative to this script so it works when
-# called from any working directory
+# Optional local libs
 # ---------------------------------------------------------------------------
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -194,6 +193,57 @@ RESERVED_PREFIXES = {
 
 
 # ---------------------------------------------------------------------------
+# *** THE FIX ***
+# iter_section — handles BOTH JSON formats emitted by the DixScript compiler:
+#
+#   Array format  (new):  {"delete_files": [{...}, {...}]}
+#   Flat-indexed  (old):  {"delete_files[0]": {...}, "delete_files[1]": {...}}
+#
+# The DixScript compiler emits the array format for reserved sections.
+# The flat-indexed format is kept for backward compatibility.
+# ---------------------------------------------------------------------------
+
+def iter_section(data, prefix):
+    """Yield each item in a reserved section regardless of JSON format."""
+    val = data.get(prefix)
+    if isinstance(val, list):
+        # Array format: {"delete_files": [{...}, ...]}
+        yield from val
+        return
+    # Flat-indexed format: {"delete_files[0]": {...}, "delete_files[1]": {...}, ...}
+    i = 0
+    while True:
+        key = f"{prefix}[{i}]"
+        if key not in data:
+            break
+        yield data[key]
+        i += 1
+
+
+def iter_string_section(data, prefix):
+    """Yield each string item in a hooks section (string array variant)."""
+    val = data.get(prefix)
+    if isinstance(val, list):
+        for item in val:
+            if isinstance(item, str):
+                yield item
+            elif isinstance(item, dict) and "value" in item:
+                yield item["value"]
+        return
+    i = 0
+    while True:
+        key = f"{prefix}[{i}]"
+        if key not in data:
+            break
+        v = data[key]
+        if isinstance(v, str):
+            yield v
+        elif isinstance(v, dict) and "value" in v:
+            yield v["value"]
+        i += 1
+
+
+# ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
 
@@ -220,15 +270,9 @@ def assemble_filename(entry):
 
 def resolve_hidden_set(data):
     hidden_set = set()
-    i = 0
-    while True:
-        key = f"hidden_dirs[{i}]"
-        if key not in data:
-            break
-        entry = data[key]
+    for entry in iter_section(data, "hidden_dirs"):
         if isinstance(entry, dict) and "segment" in entry:
             hidden_set.add(entry["segment"].strip())
-        i += 1
     return hidden_set
 
 
@@ -252,17 +296,7 @@ def collect_dir_groups(data):
 
 
 def collect_string_array(data, prefix):
-    items = []
-    i = 0
-    while True:
-        key = f"{prefix}[{i}]"
-        if key not in data:
-            break
-        val = data[key]
-        if isinstance(val, str):
-            items.append(val)
-        i += 1
-    return items
+    return list(iter_string_section(data, prefix))
 
 
 def load_manifest(manifest_json_path):
@@ -270,12 +304,8 @@ def load_manifest(manifest_json_path):
     if os.path.exists(manifest_json_path):
         with open(manifest_json_path) as fh:
             mdata = json.load(fh)
-        j = 0
-        while f"created_files[{j}]" in mdata:
-            val = mdata[f"created_files[{j}]"]
-            if isinstance(val, str):
-                previously_created.add(val)
-            j += 1
+        for entry in iter_string_section(mdata, "created_files"):
+            previously_created.add(entry)
     return previously_created
 
 
@@ -310,10 +340,6 @@ def run_hooks(hooks, hook_type="pre", dry_run=False):
 # ---------------------------------------------------------------------------
 
 def handle_existing_file(filepath, new_content, args):
-    """
-    Apply the configured file strategy to an existing file.
-    Returns (label, should_write).
-    """
     strategy = args.file_strategy
 
     if args.diff:
@@ -353,7 +379,6 @@ def handle_existing_file(filepath, new_content, args):
             os.rename(filepath, new_name)
         return f"renamed → {new_name}", True
 
-    # overwrite
     return "overwritten", True
 
 
@@ -362,12 +387,6 @@ def handle_existing_file(filepath, new_content, args):
 # ---------------------------------------------------------------------------
 
 def process_content(raw_content, name_part, ext_part, mappings, args):
-    """
-    Full content pipeline:
-      1. Fill stub default if empty
-      2. Resolve remote:: references
-      3. Apply [[key]] mappings substitution
-    """
     if raw_content == "":
         raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
 
@@ -419,35 +438,28 @@ def write_manifest(
         "\n    ".join(f'"{p}"' for p in all_tracked)
         if all_tracked else '"(none)"'
     )
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    manifest_content = (
-        "@CONFIG(\n"
-        f'  version    -> "1.0.0"\n'
-        f'  generated  -> "{now}"\n'
-        f'  features   -> "data"\n'
-        f'  debug_mode -> "off"\n'
-        ")\n\n"
-        "@DATA(\n"
-        f'  template      = "{template_path}"\n'
-        f'  template_hash = "{template_hash}"\n'
-        f'  last_run      = "{now}"\n'
-        f'  new_this_run  = {len(created)}\n'
-        f'  overridden    = {len(overridden)}\n'
-        f'  skipped       = {len(skipped)}\n'
-        f'  deleted       = {len(deleted)}\n'
-        f'  renamed       = {len(renamed)}\n'
-        f'  moved         = {len(moved)}\n'
-        f'  updated       = {len(updated)}\n'
-        "\n"
-        "  created_files::\n"
-        f"    {files_block}\n"
-        ")\n"
-    )
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest = f"""\
+@CONFIG(
+  version    -> "1.0.0"
+  author     -> "mdix-scaffold"
+  features   -> "data"
+  debug_mode -> "regular"
+)
 
-    with open(".mdix/.manifest.mdix", "w") as mf:
-        mf.write(manifest_content)
-    print(f"\n  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
+@DATA(
+  meta::
+    fc("template",      "", "{template_path}")
+    fc("template_hash", "", "{template_hash}")
+    fc("generated_at",  "", "{ts}")
+
+  created_files::
+    {files_block}
+)
+"""
+    with open(".mdix/.manifest.mdix", "w") as fh:
+        fh.write(manifest)
 
 
 # ---------------------------------------------------------------------------
@@ -457,162 +469,139 @@ def write_manifest(
 def run(args):
     if args.clear_cache:
         clear_cache()
-        sys.exit(0)
-
-    if not os.path.exists(args.structure_json):
-        print(
-            f"ERROR: Structure JSON not found at '{args.structure_json}'.\n"
-            "Run 'mdix convert <template> --to json' first.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        print("Cache cleared.")
+        return
 
     with open(args.structure_json) as fh:
         data = json.load(fh)
 
+    previously_created = load_manifest(args.manifest_json)
+    mappings           = load_mappings(args.mappings) if args.mappings and _HAS_MAPPINGS else {}
     hidden_set         = resolve_hidden_set(data)
     dir_groups         = collect_dir_groups(data)
-    previously_created = load_manifest(args.manifest_json)
     pre_hooks          = collect_string_array(data, "pre_hooks")
     post_hooks         = collect_string_array(data, "post_hooks")
-    project_name       = data.get("project_name", "unknown-project")
 
-    mappings = {}
-    if args.mappings:
-        if _HAS_MAPPINGS:
-            mappings = load_mappings(args.mappings)
-            print(f"Mappings       : {len(mappings)} keys loaded from {args.mappings}")
-        else:
-            print(
-                "WARNING: lib_mappings.py not found — --mappings flag ignored.",
-                file=sys.stderr,
-            )
-
-    if args.dry_run:
-        print("=" * 56)
-        print("  DRY RUN — no files will be written or deleted")
-        print("=" * 56)
-        print()
-
-    print(f"Project        : {project_name}")
+    print(f"Project        : {os.path.basename(os.getcwd())}")
     print(f"Template       : {args.template}")
-    print(f"Hidden dirs    : {hidden_set or '(none)'}")
+    print(f"Hidden dirs    : {', '.join(sorted(hidden_set)) or '(none)'}")
     print(f"File strategy  : {args.file_strategy}")
     print(f"Dry run        : {args.dry_run}")
     print(f"Remote content : {_HAS_REMOTE}")
     print(f"Mappings       : {bool(mappings)}")
     print(f"Patch support  : {_HAS_PATCH}")
-    if previously_created:
-        print(f"Manifest       : {len(previously_created)} previously tracked file(s)")
-    if pre_hooks:
-        print(f"Pre-hooks      : {len(pre_hooks)}")
-    if post_hooks:
-        print(f"Post-hooks     : {len(post_hooks)}")
     print()
     print(f"Template defines {len(dir_groups)} directory group(s)")
 
-    # ------------------------------------------------------------------
     # Pre-hooks
-    # ------------------------------------------------------------------
     if pre_hooks:
         print()
         print("=== Pre-hooks ===")
         print()
         if not run_hooks(pre_hooks, "pre", args.dry_run):
-            print("Aborting — pre-hook failed.", file=sys.stderr)
             sys.exit(1)
 
     # ------------------------------------------------------------------
-    # PASS 1 — Delete files / directories
+    # PASS 1 — Delete manifest-tracked files no longer in the template
     # ------------------------------------------------------------------
     deleted      = []
     header_shown = False
-    i = 0
-    while True:
-        key = f"delete_files[{i}]"
-        if key not in data:
-            break
-        entry = data[key]
-        if isinstance(entry, dict) and "path" in entry:
-            fp = entry["path"].strip()
-            if fp:
-                if not header_shown:
-                    print()
-                    print("=== Deleting files / directories ===")
-                    print()
-                    header_shown = True
-                if os.path.exists(fp):
-                    if not args.dry_run:
-                        shutil.rmtree(fp) if os.path.isdir(fp) else os.remove(fp)
-                    deleted.append(fp)
-                    print(f"  DEL  {fp}")
-                else:
-                    print(f"  ---  {fp}  (not found, skipped)")
-        i += 1
+
+    all_current = set()
+    for dir_key, items in dir_groups.items():
+        dir_path = key_to_dir(dir_key, hidden_set)
+        for entry in items.values():
+            fn = assemble_filename(entry)
+            if fn:
+                all_current.add(os.path.join(dir_path, fn) if dir_path else fn)
+
+    for fp in sorted(previously_created - all_current):
+        if os.path.exists(fp):
+            if not header_shown:
+                print()
+                print("=== Deleting stale scaffold files ===")
+                print()
+                header_shown = True
+            if not args.dry_run:
+                os.remove(fp)
+            deleted.append(fp)
+            print(f"  DEL  {fp}")
 
     # ------------------------------------------------------------------
-    # PASS 2 — Rename files / directories
+    # PASS 2a — Delete explicitly listed files
+    # ------------------------------------------------------------------
+    header_shown = False
+    for entry in iter_section(data, "delete_files"):
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        path = entry["path"].strip()
+        if not path:
+            continue
+        if not header_shown:
+            print()
+            print("=== Deleting listed files ===")
+            print()
+            header_shown = True
+        if os.path.exists(path):
+            if not args.dry_run:
+                os.remove(path)
+            deleted.append(path)
+            print(f"  DEL  {path}")
+        else:
+            print(f"  ---  {path}  (not found, skipped)")
+
+    # ------------------------------------------------------------------
+    # PASS 2b — Rename files
     # ------------------------------------------------------------------
     renamed      = []
     header_shown = False
-    i = 0
-    while True:
-        key = f"rename_files[{i}]"
-        if key not in data:
-            break
-        entry = data[key]
-        if isinstance(entry, dict) and "from_path" in entry and "to_path" in entry:
-            from_path = entry["from_path"].strip()
-            to_path   = entry["to_path"].strip()
-            if from_path and to_path:
-                if not header_shown:
-                    print()
-                    print("=== Renaming files / directories ===")
-                    print()
-                    header_shown = True
-                if os.path.exists(from_path):
-                    if not args.dry_run:
-                        parent = os.path.dirname(to_path)
-                        if parent:
-                            os.makedirs(parent, exist_ok=True)
-                        os.rename(from_path, to_path)
-                    renamed.append((from_path, to_path))
-                    print(f"  REN  {from_path} → {to_path}")
-                else:
-                    print(f"  ---  {from_path}  (not found, skipped)")
-        i += 1
+    for entry in iter_section(data, "rename_files"):
+        if not isinstance(entry, dict):
+            continue
+        from_path = entry.get("from_path", "").strip()
+        to_path   = entry.get("to_path",   "").strip()
+        if not from_path or not to_path:
+            continue
+        if not header_shown:
+            print()
+            print("=== Renaming files ===")
+            print()
+            header_shown = True
+        if os.path.exists(from_path):
+            if not args.dry_run:
+                os.rename(from_path, to_path)
+            renamed.append((from_path, to_path))
+            print(f"  REN  {from_path} → {to_path}")
+        else:
+            print(f"  ---  {from_path}  (not found, skipped)")
 
     # ------------------------------------------------------------------
-    # PASS 2b — Move files / directories  (cross-filesystem safe)
+    # PASS 2c — Move files / directories (cross-filesystem safe)
     # ------------------------------------------------------------------
     moved        = []
     header_shown = False
-    i = 0
-    while True:
-        key = f"move_files[{i}]"
-        if key not in data:
-            break
-        entry = data[key]
-        if isinstance(entry, dict) and "from_path" in entry and "to_path" in entry:
-            from_path = entry["from_path"].strip()
-            to_path   = entry["to_path"].strip()
-            if from_path and to_path:
-                if not header_shown:
-                    print()
-                    print("=== Moving files / directories ===")
-                    print()
-                    header_shown = True
-                if os.path.exists(from_path):
-                    if not args.dry_run:
-                        parent = os.path.dirname(to_path)
-                        if parent:
-                            os.makedirs(parent, exist_ok=True)
-                        shutil.move(from_path, to_path)
-                    moved.append((from_path, to_path))
-                    print(f"  MOV  {from_path} → {to_path}")
-                else:
-                    print(f"  ---  {from_path}  (not found, skipped)")
-        i += 1
+    for entry in iter_section(data, "move_files"):
+        if not isinstance(entry, dict):
+            continue
+        from_path = entry.get("from_path", "").strip()
+        to_path   = entry.get("to_path",   "").strip()
+        if not from_path or not to_path:
+            continue
+        if not header_shown:
+            print()
+            print("=== Moving files / directories ===")
+            print()
+            header_shown = True
+        if os.path.exists(from_path):
+            if not args.dry_run:
+                parent = os.path.dirname(to_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                shutil.move(from_path, to_path)
+            moved.append((from_path, to_path))
+            print(f"  MOV  {from_path} → {to_path}")
+        else:
+            print(f"  ---  {from_path}  (not found, skipped)")
 
     # ------------------------------------------------------------------
     # PASS 3 — Create / skip / override scaffold files
@@ -673,46 +662,42 @@ def run(args):
     # ------------------------------------------------------------------
     updated      = []
     header_shown = False
-    i = 0
-    while True:
-        key = f"update_files[{i}]"
-        if key not in data:
-            break
-        entry = data[key]
-        if isinstance(entry, dict) and "path" in entry:
-            file_path   = entry["path"].strip()
-            new_content = entry.get("content", "")
-            if file_path:
-                if not header_shown:
-                    print()
-                    print("=== Updating file contents ===")
-                    print()
-                    header_shown = True
+    for entry in iter_section(data, "update_files"):
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        file_path   = entry["path"].strip()
+        new_content = entry.get("content", "")
+        if not file_path:
+            continue
+        if not header_shown:
+            print()
+            print("=== Updating file contents ===")
+            print()
+            header_shown = True
 
-                new_content = process_content(new_content, "", "", mappings, args)
+        new_content = process_content(new_content, "", "", mappings, args)
 
-                if args.diff and os.path.exists(file_path):
-                    with open(file_path) as f:
-                        old_content = f.read()
-                    diff = list(difflib.unified_diff(
-                        old_content.splitlines(keepends=True),
-                        new_content.splitlines(keepends=True),
-                        fromfile=f"a/{file_path}",
-                        tofile=f"b/{file_path}",
-                    ))
-                    if diff:
-                        print("".join(diff), end="")
+        if args.diff and os.path.exists(file_path):
+            with open(file_path) as f:
+                old_content = f.read()
+            diff = list(difflib.unified_diff(
+                old_content.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{file_path}",
+                tofile=f"b/{file_path}",
+            ))
+            if diff:
+                print("".join(diff), end="")
 
-                existed_before = os.path.exists(file_path)
-                if not args.dry_run:
-                    parent = os.path.dirname(file_path)
-                    if parent:
-                        os.makedirs(parent, exist_ok=True)
-                    with open(file_path, "w") as fh:
-                        fh.write(new_content)
-                updated.append(file_path)
-                print(f"  {'UPD' if existed_before else 'NEW'}  {file_path}")
-        i += 1
+        existed_before = os.path.exists(file_path)
+        if not args.dry_run:
+            parent = os.path.dirname(file_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(file_path, "w") as fh:
+                fh.write(new_content)
+        updated.append(file_path)
+        print(f"  {'UPD' if existed_before else 'NEW'}  {file_path}")
 
     # ------------------------------------------------------------------
     # PASS 5 — Surgical file patches
@@ -720,40 +705,33 @@ def run(args):
     patched      = []
     patch_errors = []
     header_shown = False
-    i = 0
-    while True:
-        key = f"patch_files[{i}]"
-        if key not in data:
-            break
-        entry = data[key]
-        if isinstance(entry, dict) and "path" in entry and "op" in entry:
-            file_path = entry["path"].strip()
-            op_type   = entry.get("op", "").strip()
-            if file_path and op_type:
-                if not header_shown:
-                    print()
-                    print("=== Patching file contents ===")
-                    print()
-                    header_shown = True
+    for entry in iter_section(data, "patch_files"):
+        if not isinstance(entry, dict) or "path" not in entry or "op" not in entry:
+            continue
+        file_path = entry["path"].strip()
+        op_type   = entry.get("op", "").strip()
+        if not file_path or not op_type:
+            continue
+        if not header_shown:
+            print()
+            print("=== Patching file contents ===")
+            print()
+            header_shown = True
 
-                if not _HAS_PATCH:
-                    print(
-                        f"  ---  {file_path}  "
-                        f"(lib_patch.py not found — skipped [{op_type}])"
-                    )
-                else:
-                    ok = lib_patch.apply_patch(file_path, entry, dry_run=args.dry_run)
-                    if ok:
-                        patched.append(file_path)
-                        print(f"  PCH  {file_path}  ({op_type})")
-                    else:
-                        patch_errors.append(file_path)
-                        # specific error already printed by lib_patch
-        i += 1
+        if not _HAS_PATCH:
+            print(
+                f"  ---  {file_path}  "
+                f"(lib_patch.py not found — skipped [{op_type}])"
+            )
+        else:
+            ok = lib_patch.apply_patch(file_path, entry, dry_run=args.dry_run)
+            if ok:
+                patched.append(file_path)
+                print(f"  PCH  {file_path}  ({op_type})")
+            else:
+                patch_errors.append(file_path)
 
-    # ------------------------------------------------------------------
     # Post-hooks
-    # ------------------------------------------------------------------
     if post_hooks:
         print()
         print("=== Post-hooks ===")
@@ -761,9 +739,7 @@ def run(args):
         if not run_hooks(post_hooks, "post", args.dry_run):
             print("WARNING: post-hook failed.", file=sys.stderr)
 
-    # ------------------------------------------------------------------
     # Manifest + summary
-    # ------------------------------------------------------------------
     write_manifest(
         template_path=args.template,
         previously_created=previously_created,
