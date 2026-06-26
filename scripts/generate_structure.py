@@ -201,16 +201,42 @@ def collect_string_array(data, prefix):
     return list(iter_string_section(data, prefix))
 
 
-def load_manifest(manifest_json_path):
+def load_manifest(manifest_json_path, current_template=None):
+    """
+    Load previously-tracked files from the manifest JSON.
+
+    KEY SAFETY RULE: if the manifest was written by a *different* template
+    (e.g. workspace-restructure), do NOT inherit its file list.  Inheriting
+    across templates causes the stale-deletion pass to remove files that the
+    current template knows nothing about.  Each template owns only the files
+    it created.
+    """
     previously_created = set()
-    if os.path.exists(manifest_json_path):
-        try:
-            with open(manifest_json_path) as fh:
-                mdata = json.load(fh)
-            for entry in iter_string_section(mdata, "created_files"):
-                previously_created.add(entry)
-        except Exception as e:
-            print(f"  WARNING: could not read manifest ({e}) — treating as first run.")
+    if not os.path.exists(manifest_json_path):
+        return previously_created
+
+    try:
+        with open(manifest_json_path) as fh:
+            mdata = json.load(fh)
+
+        # Check template ownership — bail out on mismatch
+        manifest_template = mdata.get("template", "")
+        if current_template and manifest_template:
+            if manifest_template != current_template:
+                print(
+                    f"  Manifest belongs to a different template\n"
+                    f"    stored : {manifest_template!r}\n"
+                    f"    current: {current_template!r}\n"
+                    f"  Skipping inherited file list — treating as first run for this template."
+                )
+                return previously_created
+
+        for entry in iter_string_section(mdata, "created_files"):
+            previously_created.add(entry)
+
+    except Exception as e:
+        print(f"  WARNING: could not read manifest ({e}) — treating as first run.")
+
     return previously_created
 
 
@@ -328,6 +354,7 @@ def write_manifest(
 
     # No @QUICKFUNCS, no fc() calls, no features line (defaults to advanced).
     # Plain key=value metadata + bare string list — safe to re-parse on any run.
+    # 'template' is stored so the next run can detect cross-template contamination.
     manifest_content = (
         "@CONFIG(\n"
         f'  version    -> "1.0.0"\n'
@@ -365,12 +392,14 @@ def run(args):
     with open(args.structure_json) as fh:
         data = json.load(fh)
 
-    previously_created = load_manifest(args.manifest_json)
-    mappings           = load_mappings(args.mappings) if args.mappings and _HAS_MAPPINGS else {}
-    hidden_set         = resolve_hidden_set(data)
-    dir_groups         = collect_dir_groups(data)
-    pre_hooks          = collect_string_array(data, "pre_hooks")
-    post_hooks         = collect_string_array(data, "post_hooks")
+    # Pass current template so manifest can detect cross-template contamination
+    previously_created = load_manifest(args.manifest_json, current_template=args.template)
+
+    mappings   = load_mappings(args.mappings) if args.mappings and _HAS_MAPPINGS else {}
+    hidden_set = resolve_hidden_set(data)
+    dir_groups = collect_dir_groups(data)
+    pre_hooks  = collect_string_array(data, "pre_hooks")
+    post_hooks = collect_string_array(data, "post_hooks")
 
     print(f"Project        : {os.path.basename(os.getcwd())}")
     print(f"Template       : {args.template}")
@@ -405,7 +434,7 @@ def run(args):
                 all_current.add(os.path.join(dir_path, fn) if dir_path else fn)
 
     for fp in sorted(previously_created - all_current):
-        if os.path.exists(fp):
+        if os.path.isfile(fp):          # guard: never attempt os.remove on a dir
             if not header_shown:
                 print()
                 print("=== Deleting stale scaffold files ===")
@@ -415,6 +444,8 @@ def run(args):
                 os.remove(fp)
             deleted.append(fp)
             print(f"  DEL  {fp}")
+        elif os.path.isdir(fp):
+            print(f"  ---  {fp}  (is a directory — skipped)")
 
     # ------------------------------------------------------------------
     # PASS 2a — Delete explicitly listed files
@@ -431,11 +462,13 @@ def run(args):
             print("=== Deleting listed files ===")
             print()
             header_shown = True
-        if os.path.exists(path):
+        if os.path.isfile(path):
             if not args.dry_run:
                 os.remove(path)
             deleted.append(path)
             print(f"  DEL  {path}")
+        elif os.path.isdir(path):
+            print(f"  ---  {path}  (is a directory — use move_files to relocate)")
         else:
             print(f"  ---  {path}  (not found, skipped)")
 
