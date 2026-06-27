@@ -179,9 +179,34 @@ def resolve_hidden_set(data):
 
 
 def collect_dir_groups(data):
+    """
+    Collect directory-group entries (arrays of file objects, each with at
+    least a 'name' key) from BOTH JSON formats produced by the DixScript
+    compiler:
+      Array format  (new):  {"src": [{"name": ..., "ext": ..., ...}, ...]}
+      Flat-indexed  (old):  {"src[0]": {...}, "src[1]": {...}}
+
+    NOTE: this must stay in sync with iter_section()/iter_string_section()
+    above, which already handle both formats. This function previously
+    only matched the old flat-indexed format via regex, which silently
+    produced zero directory groups against current compiler output.
+    """
     entry_re   = re.compile(r"^(.+)\[(\d+)\]$")
     dir_groups = {}
     for key, value in data.items():
+        # --- New array format ---
+        if isinstance(value, list):
+            if key in RESERVED_PREFIXES:
+                continue
+            items = {}
+            for idx, item in enumerate(value):
+                if isinstance(item, dict) and "name" in item:
+                    items[idx] = item
+            if items:
+                dir_groups[key] = items
+            continue
+
+        # --- Old flat-indexed format ---
         m = entry_re.match(key)
         if not m:
             continue
