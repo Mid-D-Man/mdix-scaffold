@@ -6,6 +6,20 @@ DixScript is a data interchange format stored in `.mdix` files. It combines conf
 
 **Primary use cases:** game data configs, multi-environment server configs, encrypted secrets, any schema with repeated structure.
 
+**Philosophy:** readable over clever. Reduce duplication with QuickFuncs instead of copy-pasting structure. Consistent, typed, clean — type annotations exist so the shape of data is obvious at a glance, not to be skipped for brevity.
+
+---
+
+## House Style: Signature Comment
+
+Every `.mdix` file gets exactly one of these as its first line, before `@CONFIG`:
+
+```dixscript
+// Brought to u by MidManStudio
+```
+
+Plain `//` comment, every file, no exceptions, no variation in wording.
+
 ---
 
 ## File Structure
@@ -13,6 +27,8 @@ DixScript is a data interchange format stored in `.mdix` files. It combines conf
 All sections are optional. When present, use this order:
 
 ```dixscript
+// Brought to u by MidManStudio
+
 @CONFIG(...)      // compiler settings, metadata
 @IMPORTS(...)     // import from other .mdix files
 @DLM(...)         // compression + encryption pipeline
@@ -65,6 +81,8 @@ Call imported functions as `Utils.myFunc(...)` and access imported enums as `Uti
 
 Runs at compile time — output is compressed then encrypted. Pair with `@SECURITY` for key config.
 
+Not relevant to scaffold/patch templates — those describe filesystem operations, not encrypted payloads. Skip `@DLM` entirely unless you're actually building a secrets bundle.
+
 ---
 
 ## @ENUMS
@@ -89,7 +107,7 @@ Compile-time functions. They execute at compile time — zero runtime overhead.
 
 ```dixscript
 @QUICKFUNCS(
-  ~functionName<returnType>(param1, param2<paramType>, param3 = "default") {
+  ~functionName<returnType>(_param1, _param2<paramType>, _param3 = "default") {
     // statements
     return expression
   }
@@ -100,6 +118,22 @@ Compile-time functions. They execute at compile time — zero runtime overhead.
 - Return type annotation: `<int>`, `<float>`, `<string>`, `<bool>`, `<object>`, `<array>`, `<enum>`
 - Parameter type annotations are optional but recommended for clarity
 - `return` statement is required
+
+### Parameter naming: prefix with `_`
+
+Name QuickFunc parameters with a leading underscore — `_name`, `_path`, `_count` — not bare `name`/`path`/`count`. The payoff shows up the moment you build a return object: `name = _name` is unambiguous at a glance, while `name = name` makes you stop and check which side is the field key and which is the local variable. DixScript doesn't care either way; this is purely for the next person (or you, in six months) reading the call site.
+
+```dixscript
+// Confusing — which "name" is which?
+~weapon<object>(name, damage<int>) {
+  return { name = name, damage = damage }
+}
+
+// Clear — left side is the object field, right side is the param
+~weapon<object>(_name, _damage<int>) {
+  return { name = _name, damage = _damage }
+}
+```
 
 ### Control flow inside QuickFuncs
 
@@ -168,38 +202,167 @@ log: "Processing item: " + name
 | Ternary | `condition ? then : else` |
 | String concat | `+` |
 
-### Object return (most common in scaffold templates)
+---
+
+## Nested Function Calls & String Building
+
+A function call is just an `Identifier` followed by a `FunctionCall` postfix, and a call's arguments are full `Expression`s — so QuickFuncs can call other QuickFuncs as arguments, and `+` concatenation works anywhere inside a call's parentheses, including inside another call. This is confirmed working in DixScript-Rust's own test corpus (`mdix_files/ComparisonFiles/MDIX/Unholy.mdix`):
 
 ```dixscript
-~myFunc<object>(name, value<int>) {
+warranty = prodWarranty(warranty(36, "limited", [...], [...]), [extWarranty(24, 199.99, [...], 0)])
+```
+
+### Composing objects (build nested structures without duplicating shape)
+
+```dixscript
+~coords<object>(_lat<float>, _lon<float>) {
+  return { latitude = _lat, longitude = _lon }
+}
+
+~address<object>(_street, _city, _coords<object>) {
+  return { street = _street, city = _city, coordinates = _coords }
+}
+
+@DATA(
+  home = address("221B Baker St", "London", coords(51.5237, -0.1585))
+)
+```
+
+### Building repetitive strings (e.g. paths) without duplicating prefixes
+
+```dixscript
+~srcDir<string>(_subpath) {
+  return "packages/com.example.lib/Runtime/" + _subpath
+}
+
+@DATA(
+  result::
+    move(srcDir("Old/Thing.cs"), srcDir("New/Thing.cs"))
+)
+```
+
+This is a nice-to-have, not a must. Reach for it once the same literal prefix shows up three or more times in one template — below that, an inline literal is usually still the more readable choice. `Array.join()` is also available for the same purpose: `["a", "b", "c"].join("/")`.
+
+---
+
+## Comma Rules
+
+The formal grammar (`others/midx.ebnf` in DixScript-Rust, "COMMA USAGE SUMMARY") defines this exactly:
+
+### Optional (between entries/declarations)
+- Between flat properties
+- Between table property declarations
+- Between group array items (when vertical)
+- Between property assignments within a table property
+- Between array items within a group array
+- Between `@CONFIG` entries
+- Between `@ENUMS` declarations
+- Between `@IMPORTS` declarations
+- Between `@DLM` modules
+- Between `@SECURITY` entries
+
+### Required (inside collection literals)
+- Function call arguments: `func(a, b, c)`
+- Array literals: `[1, 2, 3]`
+- Object literal properties: `{ x = 1, y = 2 }`
+- Tuple elements: `t:(1, 2, 3)`
+- `@SECURITY` field lists: `{ field1 = val, field2 = val }`
+
+No trailing comma after the last element in any of the above — same as most mainstream languages.
+
+### Practical exception: QuickFunc return objects
+
+The formal grammar requires commas between object properties everywhere, including QuickFunc return objects. In practice the compiler is lenient with vertical (newline-separated) object literals, and this repo's own reference templates rely on that leniency constantly:
+
+```dixscript
+~example<object>(_a, _b) {
   return {
-    name  = name
-    value = value
-    extra = value * 2
+    a = _a
+    b = _b
   }
 }
 ```
 
-### Full example
+This works, but it's implementation leniency, not a grammar guarantee. A horizontal object literal (`{ a = _a, b = _b }`) still needs the comma regardless of context. When in doubt, or anywhere outside a vertically-laid-out QuickFunc return block, use the comma — it's never wrong and matches the spec exactly.
+
+**Rule of thumb:** commas for horizontal (same line), omit for vertical (different lines).
+
+---
+
+## Type System
+
+### Explicit type annotations
 
 ```dixscript
-@QUICKFUNCS(
-  ~camo<object>(id, index<int>, rarity<enum>, sprite) {
-    return {
-      CamoId              = id
-      CamoIndex           = index
-      CamoRarity          = rarity
-      CamoAtlasSpriteName = $"{sprite}(Clone)"
-      CamoType            = "Sprite"
-    }
-  }
-
-  ~calculateDamage<int>(base<int>, hard<bool>) {
-    multiplier = hard ? 2.0 : 1.0
-    return Math.round(base * multiplier)
-  }
-)
+count<int>      = 42
+max<long>       = 9_000_000_000L
+rate<float>     = 3.14f
+pi<double>      = 3.14159265358979
+flag<bool>      = true
+name<string>    = "Alice"
+level<enum>     = LogLevel.INFO
+color<hex>      = #FF5733
+avatar<blob>    = b:("base64encodeddata")
+pattern<regex>  = r:("^[a-z@.]+$")
+date            = 2025-12-31
+timestamp       = 2025-12-31T23:59:59Z
 ```
+
+### Numeric literals
+
+```dixscript
+42              // Integer (i32)
+9_000_000_000L  // Long (i64) — L suffix
+3_000_000_000   // Long (auto-promoted, overflows i32)
+3.14f           // Float (f32) — f suffix
+3.14            // Double (f64)
+0xFF            // Hex integer
+0xFF_FFDEAD L   // Hex long — L suffix
+0b1010_1100     // Binary integer
+0b1111L         // Binary long
+1_000_000       // Underscores as visual separators (any numeric)
+#FF5733         // HexColor (3–8 hex digits)
+```
+
+---
+
+## Identifier Rules
+
+**Snake-case** works everywhere:
+```dixscript
+my_variable
+project_name
+MAX_RETRIES
+```
+
+**Kebab-case** works in all sections **except `@QUICKFUNCS`** (where `-` is arithmetic minus):
+```dixscript
+// In @DATA, @CONFIG, @ENUMS — valid:
+getting-started::
+  fc("getting-started", "md", "# Getting Started\n")
+
+// In @QUICKFUNCS — INVALID (hyphen = subtraction):
+~my-func<object>()  // ← DON'T do this
+~my_func<object>()  // ← correct
+```
+
+---
+
+## Built-in Instance & Static Methods
+
+Useful for transforming strings, arrays, and numbers inside QuickFunc bodies without hand-rolling logic.
+
+**String instance:** `.charAt()` `.contains()` `.endsWith()` `.indexOf()` `.isBlank()` `.isEmpty()` `.lastIndexOf()` `.length()` `.padLeft()` `.padRight()` `.replace()` `.split()` `.startsWith()` `.substring()` `.toLower()` `.toUpper()` `.trim()`
+
+**Array instance:** `.average()` `.concat()` `.contains()` `.count()` `.distinct()` `.filter()` `.first()` `.flatten()` `.get()` `.indexOf()` `.isEmpty()` `.join()` `.last()` `.lastIndexOf()` `.length()` `.max()` `.min()` `.pop()` `.push()` `.reverse()` `.set()` `.shift()` `.slice()` `.sort()` `.sum()` `.unshift()`
+
+**Number instance:** `.abs()` `.ceil()` `.floor()` `.isEven()` `.isFinite()` `.isInfinity()` `.isNaN()` `.isNegative()` `.isOdd()` `.isPositive()` `.round()` `.sign()` `.toDouble()` `.toFloat()` `.toInt()` `.toString()`
+
+**Object instance:** `.add()` `.containsValue()` `.count()` `.entries()` `.get()` `.has()` `.keys()` `.length()` `.merge()` `.remove()` `.set()` `.toArray()` `.values()`
+
+**Math static:** `Math.abs()` `Math.ceil()` `Math.clamp()` `Math.cos()` `Math.degrees()` `Math.e()` `Math.exp()` `Math.floor()` `Math.log()` `Math.max()` `Math.min()` `Math.pi()` `Math.pow()` `Math.radians()` `Math.remainder()` `Math.round()` `Math.sign()` `Math.sin()` `Math.sqrt()` `Math.tan()` `Math.truncate()`
+
+Example chaining: `first.trim().toUpper() + " " + last.trim().toUpper()`
 
 ---
 
@@ -265,86 +428,6 @@ Objects use commas between properties. Arrays use commas between elements.
 
 ---
 
-## Comma Rules
-
-### Optional (between entries/declarations)
-- Between flat properties
-- Between table property declarations
-- Between group array items (when vertical)
-- Between `@CONFIG` entries
-- Between `@ENUMS` declarations
-- Between `@IMPORTS` declarations
-- Between `@DLM` modules
-
-### Required (inside collection literals)
-- Function call arguments: `func(a, b, c)`
-- Array literals: `[1, 2, 3]`
-- Object literal properties: `{ x = 1, y = 2 }`
-- Tuple elements: `t:(1, 2, 3)`
-
-**Rule of thumb:** commas for horizontal (same line), omit for vertical (different lines).
-
----
-
-## Type System
-
-### Explicit type annotations
-
-```dixscript
-count<int>      = 42
-max<long>       = 9_000_000_000L
-rate<float>     = 3.14f
-pi<double>      = 3.14159265358979
-flag<bool>      = true
-name<string>    = "Alice"
-level<enum>     = LogLevel.INFO
-color<hex>      = #FF5733
-avatar<blob>    = b:("base64encodeddata")
-pattern<regex>  = r:("^[a-z@.]+$")
-date            = 2025-12-31
-timestamp       = 2025-12-31T23:59:59Z
-```
-
-### Numeric literals
-
-```dixscript
-42              // Integer (i32)
-9_000_000_000L  // Long (i64) — L suffix
-3_000_000_000   // Long (auto-promoted, overflows i32)
-3.14f           // Float (f32) — f suffix
-3.14            // Double (f64)
-0xFF            // Hex integer
-0xFF_FFDEAD L   // Hex long — L suffix
-0b1010_1100     // Binary integer
-0b1111L         // Binary long
-1_000_000       // Underscores as visual separators (any numeric)
-#FF5733         // HexColor (3–8 hex digits)
-```
-
----
-
-## Identifier Rules
-
-**Snake-case** works everywhere:
-```dixscript
-my_variable
-project_name
-MAX_RETRIES
-```
-
-**Kebab-case** works in all sections **except `@QUICKFUNCS`** (where `-` is arithmetic minus):
-```dixscript
-// In @DATA, @CONFIG, @ENUMS — valid:
-getting-started::
-  fc("getting-started", "md", "# Getting Started\n")
-
-// In @QUICKFUNCS — INVALID (hyphen = subtraction):
-~my-func<object>()  // ← DON'T do this
-~my_func<object>()  // ← correct
-```
-
----
-
 ## @SECURITY
 
 ```dixscript
@@ -398,13 +481,13 @@ mdix --version
 )
 
 @QUICKFUNCS(
-  ~weapon<object>(id, class<enum>, damage<int>, rarity<enum>) {
+  ~weapon<object>(_id, _class<enum>, _damage<int>, _rarity<enum>) {
     return {
-      WeaponId    = id
-      WeaponClass = class
-      BaseDamage  = damage
-      Rarity      = rarity
-      SellPrice   = damage * 10
+      WeaponId    = _id
+      WeaponClass = _class
+      BaseDamage  = _damage
+      Rarity      = _rarity
+      SellPrice   = _damage * 10
     }
   }
 )
@@ -426,8 +509,8 @@ mdix --version
 )
 
 @QUICKFUNCS(
-  ~dbConfig<object>(host, port<int>, name) {
-    return { host = host, port = port, name = name }
+  ~dbConfig<object>(_host, _port<int>, _name) {
+    return { host = _host, port = _port, name = _name }
   }
 )
 
@@ -445,43 +528,45 @@ mdix --version
 
 ### Scaffold template QuickFuncs block (copy-paste starter)
 
+Don't paste this whole block into every template — see the scaffold skill's "only define what you call" rule. This is the full reference; pull individual functions from it as needed.
+
 ```dixscript
 @QUICKFUNCS(
 
-  ~f<object>(name, ext) {
-    return { name = name, ext = ext, content = "" }
+  ~f<object>(_name, _ext) {
+    return { name = _name, ext = _ext, content = "" }
   }
 
-  ~fc<object>(name, ext, content) {
-    return { name = name, ext = ext, content = content }
+  ~fc<object>(_name, _ext, _content) {
+    return { name = _name, ext = _ext, content = _content }
   }
 
-  ~fremote<object>(name, ext, url) {
-    return { name = name, ext = ext, content = "remote::" + url }
+  ~fremote<object>(_name, _ext, _url) {
+    return { name = _name, ext = _ext, content = "remote::" + _url }
   }
 
   ~gitkeep<object>() {
     return { name = ".gitkeep", ext = "", content = "" }
   }
 
-  ~hidden<object>(segment) {
-    return { segment = segment }
+  ~hidden<object>(_segment) {
+    return { segment = _segment }
   }
 
-  ~delete_file<object>(path) {
-    return { path = path }
+  ~delete_file<object>(_path) {
+    return { path = _path }
   }
 
-  ~rename<object>(src, dst) {
-    return { from_path = src, to_path = dst }
+  ~rename<object>(_src, _dst) {
+    return { from_path = _src, to_path = _dst }
   }
 
-  ~move<object>(src, dst) {
-    return { from_path = src, to_path = dst }
+  ~move<object>(_src, _dst) {
+    return { from_path = _src, to_path = _dst }
   }
 
-  ~update<object>(path, content) {
-    return { path = path, content = content }
+  ~update<object>(_path, _content) {
+    return { path = _path, content = _content }
   }
 
 )
@@ -491,7 +576,7 @@ mdix --version
 
 ## Common Mistakes
 
-- **Commas inside object/array literals are required.** `{ x = 1 y = 2 }` is a parse error. Use `{ x = 1, y = 2 }`.
+- **Commas inside horizontal object/array literals are required.** `{ x = 1 y = 2 }` on one line is a parse error. Use `{ x = 1, y = 2 }`. Vertical layout is the one place this loosens — see Comma Rules.
 - **Commas in function calls are required.** `func(a b)` is a parse error. Use `func(a, b)`.
 - **Kebab identifiers in `@QUICKFUNCS` are parsed as subtraction.** Use snake_case inside `@QUICKFUNCS`.
 - **`->` is for `@CONFIG` and `@SECURITY` only.** Use `=` for `@DATA` flat properties and inside objects.
@@ -499,3 +584,5 @@ mdix --version
 - **Flat properties must come before grouped entries in `@DATA`.** You can't interleave them.
 - **`return` is required in QuickFuncs.** There is no implicit last-expression return.
 - **`if:` not `if`.** Control-flow keywords take a trailing colon: `if:`, `elif:`, `chk:`, `log:`.
+- **`param = param` instead of `param = _param`.** Prefix QuickFunc parameters with `_` so return-object construction reads unambiguously.
+- **Missing the signature comment.** Every `.mdix` file starts with `// Brought to u by MidManStudio`.
