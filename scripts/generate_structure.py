@@ -64,6 +64,17 @@ def parse_args():
     p.add_argument("--no-cache",    action="store_true", default=False)
     p.add_argument("--verbose", action="store_true",
         default=os.environ.get("VERBOSE", "false").lower() == "true")
+    # ── PASS 1 prune gate ────────────────────────────────────────────────────
+    # OFF by default. The scaffold is a generator, not a sync tool.
+    # Stale-file deletion must be explicitly opted into; it must never happen
+    # as a side-effect of simplifying or patching a template.
+    p.add_argument("--prune", action="store_true",
+        default=os.environ.get("PRUNE_STALE", "false").lower() == "true",
+        help=(
+            "Remove manifest-tracked files that are no longer declared in the "
+            "template.  OFF by default — the scaffold never deletes files "
+            "implicitly.  Enable with PRUNE_STALE=true or --prune."
+        ))
 
     args = p.parse_args()
     if args.override_stubs:
@@ -98,6 +109,7 @@ STUB_DEFAULTS = {
     "xml":    '<?xml version="1.0" encoding="utf-8"?>\n',
     "html":   "<!DOCTYPE html>\n<html>\n<head><title>{name}</title></head>\n<body>\n</body>\n</html>\n",
     "css":    "/* Auto-generated stub */\n",
+    "svelte": "<!-- Auto-generated stub -->\n",
 }
 
 RESERVED_PREFIXES = {
@@ -185,11 +197,6 @@ def collect_dir_groups(data):
     compiler:
       Array format  (new):  {"src": [{"name": ..., "ext": ..., ...}, ...]}
       Flat-indexed  (old):  {"src[0]": {...}, "src[1]": {...}}
-
-    NOTE: this must stay in sync with iter_section()/iter_string_section()
-    above, which already handle both formats. This function previously
-    only matched the old flat-indexed format via regex, which silently
-    produced zero directory groups against current compiler output.
     """
     entry_re   = re.compile(r"^(.+)\[(\d+)\]$")
     dir_groups = {}
@@ -220,6 +227,64 @@ def collect_dir_groups(data):
             dir_groups[dir_key] = {}
         dir_groups[dir_key][idx] = value
     return dir_groups
+
+
+# ---------------------------------------------------------------------------
+# build_all_current — every path the template owns across ALL operations.
+#
+# Previously only dir_groups (fc() calls) were included, which caused two
+# bugs:
+#   1. update_files-managed paths were missing → they looked "stale" and
+#      got deleted on every second run even with a full template.
+#   2. move/rename destinations were missing → files moved by the scaffold
+#      got deleted on the very next run.
+#
+# This function is the single source of truth for "what does this template
+# own?" and is used by PASS 1 (--prune mode) to determine what to clean up.
+# ---------------------------------------------------------------------------
+
+def build_all_current(data, dir_groups, hidden_set):
+    all_current = set()
+
+    # From fc() group calls — PASS 3
+    for dir_key, items in dir_groups.items():
+        dir_path = key_to_dir(dir_key, hidden_set)
+        for entry in items.values():
+            fn = assemble_filename(entry)
+            if fn:
+                all_current.add(os.path.join(dir_path, fn) if dir_path else fn)
+
+    # From update_files — PASS 4
+    for entry in iter_section(data, "update_files"):
+        if isinstance(entry, dict) and "path" in entry:
+            p = entry["path"].strip()
+            if p:
+                all_current.add(p)
+
+    # From move_files destinations — PASS 2c
+    # (source paths are intentionally NOT included; they no longer exist
+    #  after the move and should not be "protected" from pruning)
+    for entry in iter_section(data, "move_files"):
+        if isinstance(entry, dict) and "to_path" in entry:
+            p = entry["to_path"].strip()
+            if p:
+                all_current.add(p)
+
+    # From rename_files destinations — PASS 2b
+    for entry in iter_section(data, "rename_files"):
+        if isinstance(entry, dict) and "to_path" in entry:
+            p = entry["to_path"].strip()
+            if p:
+                all_current.add(p)
+
+    # From patch_files targets — PASS 5
+    for entry in iter_section(data, "patch_files"):
+        if isinstance(entry, dict) and "path" in entry:
+            p = entry["path"].strip()
+            if p:
+                all_current.add(p)
+
+    return all_current
 
 
 def collect_string_array(data, prefix):
@@ -377,9 +442,6 @@ def write_manifest(
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # No @QUICKFUNCS, no fc() calls, no features line (defaults to advanced).
-    # Plain key=value metadata + bare string list — safe to re-parse on any run.
-    # 'template' is stored so the next run can detect cross-template contamination.
     manifest_content = (
         "@CONFIG(\n"
         f'  version    -> "1.0.0"\n'
@@ -417,7 +479,6 @@ def run(args):
     with open(args.structure_json) as fh:
         data = json.load(fh)
 
-    # Pass current template so manifest can detect cross-template contamination
     previously_created = load_manifest(args.manifest_json, current_template=args.template)
 
     mappings   = load_mappings(args.mappings) if args.mappings and _HAS_MAPPINGS else {}
@@ -426,16 +487,21 @@ def run(args):
     pre_hooks  = collect_string_array(data, "pre_hooks")
     post_hooks = collect_string_array(data, "post_hooks")
 
+    # Build the complete set of paths this template owns (all passes)
+    all_current = build_all_current(data, dir_groups, hidden_set)
+
     print(f"Project        : {os.path.basename(os.getcwd())}")
     print(f"Template       : {args.template}")
     print(f"Hidden dirs    : {', '.join(sorted(hidden_set)) or '(none)'}")
     print(f"File strategy  : {args.file_strategy}")
     print(f"Dry run        : {args.dry_run}")
+    print(f"Prune stale    : {args.prune}  (PRUNE_STALE=true or --prune to enable)")
     print(f"Remote content : {_HAS_REMOTE}")
     print(f"Mappings       : {bool(mappings)}")
     print(f"Patch support  : {_HAS_PATCH}")
     print()
-    print(f"Template defines {len(dir_groups)} directory group(s)")
+    print(f"Template defines {len(dir_groups)} directory group(s), "
+          f"{len(all_current)} total managed path(s)")
 
     if pre_hooks:
         print()
@@ -445,32 +511,43 @@ def run(args):
             sys.exit(1)
 
     # ------------------------------------------------------------------
-    # PASS 1 — Delete manifest-tracked files no longer in the template
+    # PASS 1 — Remove manifest-tracked files no longer in the template
+    #
+    # GATED BEHIND --prune / PRUNE_STALE=true.
+    # OFF BY DEFAULT — the scaffold is a generator, not a sync tool.
+    # Modifying or simplifying a template must never silently delete files.
+    # Only explicit delete_files:: entries (PASS 2a) delete files by default.
+    #
+    # When --prune IS enabled, all_current (built above from every section:
+    # dir_groups, update_files, move_files destinations, rename_files
+    # destinations, patch_files) is used so no managed file is ever
+    # wrongly classified as stale.
     # ------------------------------------------------------------------
     deleted      = []
-    header_shown = False
+    stale        = sorted(previously_created - all_current)
 
-    all_current = set()
-    for dir_key, items in dir_groups.items():
-        dir_path = key_to_dir(dir_key, hidden_set)
-        for entry in items.values():
-            fn = assemble_filename(entry)
-            if fn:
-                all_current.add(os.path.join(dir_path, fn) if dir_path else fn)
+    if stale and not args.prune:
+        print()
+        print(f"  NOTE: {len(stale)} manifest-tracked file(s) are no longer declared in "
+              f"the template. Re-run with PRUNE_STALE=true (or --prune) to remove them.")
+        if args.verbose:
+            for fp in stale:
+                print(f"    stale: {fp}")
 
-    for fp in sorted(previously_created - all_current):
-        if os.path.isfile(fp):          # guard: never attempt os.remove on a dir
-            if not header_shown:
-                print()
-                print("=== Deleting stale scaffold files ===")
-                print()
-                header_shown = True
-            if not args.dry_run:
-                os.remove(fp)
-            deleted.append(fp)
-            print(f"  DEL  {fp}")
-        elif os.path.isdir(fp):
-            print(f"  ---  {fp}  (is a directory — skipped)")
+    if args.prune and stale:
+        print()
+        print("=== Pruning stale scaffold files ===")
+        print()
+        for fp in stale:
+            if os.path.isfile(fp):
+                if not args.dry_run:
+                    os.remove(fp)
+                deleted.append(fp)
+                print(f"  DEL  {fp}")
+            elif os.path.isdir(fp):
+                print(f"  ---  {fp}  (directory — skipped; use delete_files or post_hooks)")
+            else:
+                print(f"  ---  {fp}  (not found — already gone)")
 
     # ------------------------------------------------------------------
     # PASS 2a — Delete explicitly listed files
@@ -493,7 +570,7 @@ def run(args):
             deleted.append(path)
             print(f"  DEL  {path}")
         elif os.path.isdir(path):
-            print(f"  ---  {path}  (is a directory — use move_files to relocate)")
+            print(f"  ---  {path}  (is a directory — use post_hooks: rm -rf to remove)")
         else:
             print(f"  ---  {path}  (not found, skipped)")
 
