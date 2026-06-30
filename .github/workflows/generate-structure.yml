@@ -1,4 +1,3 @@
-# .github/workflows/generate-structure.yml
 name: Generate project structure
 
 on:
@@ -64,24 +63,40 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Get weekly cache key
-        id: week
-        run: echo "key=$(date -u '+%Y-%U')" >> "$GITHUB_OUTPUT"
+      # Cache key is now pinned to DixScript-Rust's live master SHA instead of
+      # a weekly timestamp. Any commit to DixScript-Rust master automatically
+      # busts this cache on the very next run — no manual clearing required,
+      # and no week-long window where a fix can land upstream but still be
+      # invisible here. This is the actual fix for the
+      # "crates.midn-ecs.src silently dropped" class of bug: previously a fix
+      # landing in DixScript-Rust could sit unused in CI for up to a week.
+      - name: Resolve DixScript-Rust master SHA
+        id: dixscript-rev
+        run: |
+          sha=$(git ls-remote https://github.com/Mid-D-Man/DixScript-Rust.git refs/heads/master | cut -f1)
+          if [ -z "$sha" ]; then
+            echo "::error::Could not resolve DixScript-Rust master SHA via git ls-remote"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "DixScript-Rust master is at $sha"
 
       - name: Cache mdix CLI binary
         id: cache-mdix
         uses: actions/cache@v4
         with:
           path: ~/.mdix-bin
-          key: mdix-cli-${{ runner.os }}-${{ steps.week.outputs.key }}
+          key: mdix-cli-${{ runner.os }}-${{ steps.dixscript-rev.outputs.sha }}
           restore-keys: mdix-cli-${{ runner.os }}-
 
       - name: Build mdix CLI (cache miss only)
         if: steps.cache-mdix.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — building mdix CLI from source..."
+          echo "Cache miss for SHA ${{ steps.dixscript-rev.outputs.sha }} — building mdix CLI from source..."
           git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
           cd /tmp/dixscript
+          actual_sha=$(git rev-parse HEAD)
+          echo "Cloned commit: $actual_sha"
           cargo build -p mdix-cli --release
           mkdir -p ~/.mdix-bin
           cp target/release/mdix ~/.mdix-bin/mdix
@@ -131,7 +146,7 @@ jobs:
       - name: Convert template to JSON
         run: |
           TMPL="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
-          mdix convert "$TMPL" --to json -o /tmp/structure.json
+          mdix convert "$TMPL" --to json --pretty -o /tmp/structure.json
           echo "Resolved keys:"
           python3 -c "
           import json
@@ -139,6 +154,9 @@ jobs:
           for k in sorted(d.keys()):
               print(f'  {k} = {str(d[k])[:60]}')
           "
+          echo "::group::Full untruncated structure.json"
+          cat /tmp/structure.json
+          echo "::endgroup::"
 
       - name: Convert manifest to JSON (if exists)
         run: |
