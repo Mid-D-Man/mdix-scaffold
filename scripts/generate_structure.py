@@ -1,4 +1,3 @@
-# scripts/generate_structure.py
 #!/usr/bin/env python3
 """
 Generate project structure from a .mdix template.
@@ -64,6 +63,8 @@ def parse_args():
     p.add_argument("--no-cache",    action="store_true", default=False)
     p.add_argument("--verbose", action="store_true",
         default=os.environ.get("VERBOSE", "false").lower() == "true")
+    p.add_argument("--dump-json", action="store_true", default=False,
+        help="Print the full untruncated structure JSON and exit (or continue if verbose)")
     # ── PASS 1 prune gate ────────────────────────────────────────────────────
     # OFF by default. The scaffold is a generator, not a sync tool.
     # Stale-file deletion must be explicitly opted into; it must never happen
@@ -109,7 +110,7 @@ STUB_DEFAULTS = {
     "xml":    '<?xml version="1.0" encoding="utf-8"?>\n',
     "html":   "<!DOCTYPE html>\n<html>\n<head><title>{name}</title></head>\n<body>\n</body>\n</html>\n",
     "css":    "/* Auto-generated stub */\n",
-    "svelte": "<!-- Auto-generated stub -->\n",
+    "svelte": "\n",
 }
 
 RESERVED_PREFIXES = {
@@ -192,33 +193,9 @@ def resolve_hidden_set(data):
 
 # ---------------------------------------------------------------------------
 # _flatten_nested_dict_into_groups — defensive fallback for old `to_json`
-#
-# The old DixScript `to_json` serializer reconstructed nested JSON objects
-# from dotted @DATA group paths:
-#
-#   crates.midn-ecs::    →  {"crates": {"midn-ecs": [...]}}
-#   crates.midn-ecs.src:: →  SILENTLY DROPPED because "midn-ecs" was already
-#                             inserted as an Array and can't become an Object.
-#
-# The primary fix is `to_json_flat` in conversion.rs (2026-06-29), which
-# keeps every dotted path as its own flat top-level key so no collision is
-# possible. This helper is a belt-and-suspenders fallback: if a run somehow
-# still produces nested JSON (old cached binary, manual invocation, etc.) we
-# recover whatever levels the old serializer managed to preserve, so at least
-# the top-level group files are created rather than 0 files.
-#
-# Flat keys added by `to_json_flat` always take precedence: we only insert
-# into dir_groups when the dotted key isn't already present.
 # ---------------------------------------------------------------------------
 
 def _flatten_nested_dict_into_groups(prefix, nested, dir_groups):
-    """
-    Recursively walk a nested dict and register every list-of-file-objects
-    leaf as a dir_group entry under its full dotted path.
-
-    e.g.  prefix="crates", nested={"midn-ecs": [{"name":"Cargo",...}]}
-          → dir_groups["crates.midn-ecs"] = {0: {"name":"Cargo",...}}
-    """
     for key, value in nested.items():
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(value, list):
@@ -233,28 +210,6 @@ def _flatten_nested_dict_into_groups(prefix, nested, dir_groups):
 
 
 def collect_dir_groups(data):
-    """
-    Collect directory-group entries (arrays of file objects, each with at
-    least a 'name' key) from ALL JSON formats produced by the DixScript
-    compiler:
-
-      Flat array   (current):  {"crates.midn-ecs": [{"name":...}, ...]}
-                                Produced by `to_json_flat` (conversion.rs fix
-                                2026-06-29). Every dotted @DATA path is its own
-                                top-level JSON key — no path can shadow another.
-
-      Flat-indexed (legacy):   {"crates.midn-ecs[0]": {...}, ...}
-                                Older serializer variant that indexed each item.
-
-      Nested dict  (old bug):  {"crates": {"midn-ecs": [...], ...}}
-                                Old `to_json` path that built nested objects
-                                from dotted segments. Silently dropped any group
-                                path that was a prefix of a deeper one (e.g.
-                                "crates.midn-ecs.src" was dropped whenever
-                                "crates.midn-ecs" already existed as an Array).
-                                Handled here as a defensive fallback via
-                                _flatten_nested_dict_into_groups.
-    """
     entry_re   = re.compile(r"^(.+)\[(\d+)\]$")
     dir_groups = {}
     for key, value in data.items():
@@ -271,11 +226,6 @@ def collect_dir_groups(data):
             continue
 
         # --- Nested-object format (old `to_json` fallback) --------------------
-        # `to_json` turned "crates.midn-ecs" into {"crates": {"midn-ecs": [...]}}
-        # which meant collect_dir_groups never saw a list at the top level.
-        # Recursively flatten so we at least recover whatever levels survived
-        # (deeper paths lost to the Array-vs-Object collision are unrecoverable
-        # without the `to_json_flat` binary fix, but top-level groups are saved).
         if isinstance(value, dict) and key not in RESERVED_PREFIXES:
             _flatten_nested_dict_into_groups(key, value, dir_groups)
             continue
@@ -296,24 +246,9 @@ def collect_dir_groups(data):
     return dir_groups
 
 
-# ---------------------------------------------------------------------------
-# build_all_current — every path the template owns across ALL operations.
-#
-# Previously only dir_groups (fc() calls) were included, which caused two
-# bugs:
-#   1. update_files-managed paths were missing → they looked "stale" and
-#      got deleted on every second run even with a full template.
-#   2. move/rename destinations were missing → files moved by the scaffold
-#      got deleted on the very next run.
-#
-# This function is the single source of truth for "what does this template
-# own?" and is used by PASS 1 (--prune mode) to determine what to clean up.
-# ---------------------------------------------------------------------------
-
 def build_all_current(data, dir_groups, hidden_set):
     all_current = set()
 
-    # From fc() group calls — PASS 3
     for dir_key, items in dir_groups.items():
         dir_path = key_to_dir(dir_key, hidden_set)
         for entry in items.values():
@@ -321,30 +256,24 @@ def build_all_current(data, dir_groups, hidden_set):
             if fn:
                 all_current.add(os.path.join(dir_path, fn) if dir_path else fn)
 
-    # From update_files — PASS 4
     for entry in iter_section(data, "update_files"):
         if isinstance(entry, dict) and "path" in entry:
             p = entry["path"].strip()
             if p:
                 all_current.add(p)
 
-    # From move_files destinations — PASS 2c
-    # (source paths are intentionally NOT included; they no longer exist
-    #  after the move and should not be "protected" from pruning)
     for entry in iter_section(data, "move_files"):
         if isinstance(entry, dict) and "to_path" in entry:
             p = entry["to_path"].strip()
             if p:
                 all_current.add(p)
 
-    # From rename_files destinations — PASS 2b
     for entry in iter_section(data, "rename_files"):
         if isinstance(entry, dict) and "to_path" in entry:
             p = entry["to_path"].strip()
             if p:
                 all_current.add(p)
 
-    # From patch_files targets — PASS 5
     for entry in iter_section(data, "patch_files"):
         if isinstance(entry, dict) and "path" in entry:
             p = entry["path"].strip()
@@ -359,15 +288,6 @@ def collect_string_array(data, prefix):
 
 
 def load_manifest(manifest_json_path, current_template=None):
-    """
-    Load previously-tracked files from the manifest JSON.
-
-    KEY SAFETY RULE: if the manifest was written by a *different* template
-    (e.g. workspace-restructure), do NOT inherit its file list.  Inheriting
-    across templates causes the stale-deletion pass to remove files that the
-    current template knows nothing about.  Each template owns only the files
-    it created.
-    """
     previously_created = set()
     if not os.path.exists(manifest_json_path):
         return previously_created
@@ -376,7 +296,6 @@ def load_manifest(manifest_json_path, current_template=None):
         with open(manifest_json_path) as fh:
             mdata = json.load(fh)
 
-        # Check template ownership — bail out on mismatch
         manifest_template = mdata.get("template", "")
         if current_template and manifest_template:
             if manifest_template != current_template:
@@ -546,6 +465,13 @@ def run(args):
     with open(args.structure_json) as fh:
         data = json.load(fh)
 
+    if args.dump_json or args.verbose:
+        print("\n=== Full Untruncated JSON Data ===")
+        print(json.dumps(data, indent=2))
+        print("==================================\n")
+        if args.dump_json and not args.verbose:
+            return  # Exit early if only --dump-json was requested without --verbose
+
     previously_created = load_manifest(args.manifest_json, current_template=args.template)
 
     mappings   = load_mappings(args.mappings) if args.mappings and _HAS_MAPPINGS else {}
@@ -554,7 +480,6 @@ def run(args):
     pre_hooks  = collect_string_array(data, "pre_hooks")
     post_hooks = collect_string_array(data, "post_hooks")
 
-    # Build the complete set of paths this template owns (all passes)
     all_current = build_all_current(data, dir_groups, hidden_set)
 
     print(f"Project        : {os.path.basename(os.getcwd())}")
@@ -577,19 +502,6 @@ def run(args):
         if not run_hooks(pre_hooks, "pre", args.dry_run):
             sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # PASS 1 — Remove manifest-tracked files no longer in the template
-    #
-    # GATED BEHIND --prune / PRUNE_STALE=true.
-    # OFF BY DEFAULT — the scaffold is a generator, not a sync tool.
-    # Modifying or simplifying a template must never silently delete files.
-    # Only explicit delete_files:: entries (PASS 2a) delete files by default.
-    #
-    # When --prune IS enabled, all_current (built above from every section:
-    # dir_groups, update_files, move_files destinations, rename_files
-    # destinations, patch_files) is used so no managed file is ever
-    # wrongly classified as stale.
-    # ------------------------------------------------------------------
     deleted      = []
     stale        = sorted(previously_created - all_current)
 
@@ -616,9 +528,6 @@ def run(args):
             else:
                 print(f"  ---  {fp}  (not found — already gone)")
 
-    # ------------------------------------------------------------------
-    # PASS 2a — Delete explicitly listed files
-    # ------------------------------------------------------------------
     header_shown = False
     for entry in iter_section(data, "delete_files"):
         if not isinstance(entry, dict) or "path" not in entry:
@@ -641,9 +550,6 @@ def run(args):
         else:
             print(f"  ---  {path}  (not found, skipped)")
 
-    # ------------------------------------------------------------------
-    # PASS 2b — Rename files
-    # ------------------------------------------------------------------
     renamed      = []
     header_shown = False
     for entry in iter_section(data, "rename_files"):
@@ -666,9 +572,6 @@ def run(args):
         else:
             print(f"  ---  {from_path}  (not found, skipped)")
 
-    # ------------------------------------------------------------------
-    # PASS 2c — Move files / directories (cross-filesystem safe)
-    # ------------------------------------------------------------------
     moved        = []
     header_shown = False
     for entry in iter_section(data, "move_files"):
@@ -694,9 +597,6 @@ def run(args):
         else:
             print(f"  ---  {from_path}  (not found, skipped)")
 
-    # ------------------------------------------------------------------
-    # PASS 3 — Create / skip / override scaffold files
-    # ------------------------------------------------------------------
     created    = []
     skipped    = []
     overridden = []
@@ -747,9 +647,6 @@ def run(args):
                 created.append(filepath)
                 print(f"  NEW  {filepath}")
 
-    # ------------------------------------------------------------------
-    # PASS 4 — Update file contents (always-overwrite, creates if missing)
-    # ------------------------------------------------------------------
     updated      = []
     header_shown = False
     for entry in iter_section(data, "update_files"):
@@ -789,9 +686,6 @@ def run(args):
         updated.append(file_path)
         print(f"  {'UPD' if existed_before else 'NEW'}  {file_path}")
 
-    # ------------------------------------------------------------------
-    # PASS 5 — Surgical file patches
-    # ------------------------------------------------------------------
     patched      = []
     patch_errors = []
     header_shown = False
