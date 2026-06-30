@@ -24,10 +24,6 @@ on:
         description: 'Path to .mdix mappings file for [[key]] substitution (leave blank to skip)'
         required: false
         default: ''
-      clear_cache:
-        description: 'Delete the cached mdix CLI binary before running, forcing a fresh build (true/false)'
-        required: false
-        default: 'false'
   push:
     paths:
       - '.mdix/project_structure/**'
@@ -54,44 +50,9 @@ on:
         required: false
         type: string
         default: ''
-      clear_cache:
-        required: false
-        type: string
-        default: 'false'
 
 jobs:
-  # Split out from `generate` on purpose. `actions: write` is only needed for
-  # `gh cache delete`, and a job's *declared* permissions are checked at
-  # workflow-call validation time regardless of whether the gated step inside
-  # it actually runs. If `actions: write` lived on `generate`, every caller of
-  # this reusable workflow would be forced to grant `actions: write` just to
-  # generate structure, even when clear_cache is never used (the common case).
-  # Keeping it isolated here means callers only need that extra scope on the
-  # rare run where they actually pass clear_cache: true.
-  clear-cache:
-    if: ${{ inputs.clear_cache == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Clear cached mdix CLI binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "Clearing mdix-cli-* caches for this repo..."
-          ids=$(gh cache list --key mdix-cli- --json id,key --jq '.[] | "\(.id)\t\(.key)"' || true)
-          if [ -z "$ids" ]; then
-            echo "  none found — nothing to clear."
-          else
-            echo "$ids" | while IFS=$'\t' read -r id key; do
-              echo "  deleting $key (id=$id)"
-              gh cache delete "$id" || true
-            done
-          fi
-
   generate:
-    needs: clear-cache
-    if: ${{ always() && (needs.clear-cache.result == 'success' || needs.clear-cache.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
