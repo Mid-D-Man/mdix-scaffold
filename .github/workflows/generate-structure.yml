@@ -23,6 +23,10 @@ on:
         description: 'Path to .mdix mappings file for [[key]] substitution (leave blank to skip)'
         required: false
         default: ''
+      dump_json:
+        description: 'Dump the full untruncated structure JSON (true/false)'
+        required: false
+        default: 'false'
   push:
     paths:
       - '.mdix/project_structure/**'
@@ -49,6 +53,10 @@ on:
         required: false
         type: string
         default: ''
+      dump_json:
+        required: false
+        type: string
+        default: 'false'
 
 jobs:
   generate:
@@ -63,13 +71,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Cache key is now pinned to DixScript-Rust's live master SHA instead of
-      # a weekly timestamp. Any commit to DixScript-Rust master automatically
-      # busts this cache on the very next run — no manual clearing required,
-      # and no week-long window where a fix can land upstream but still be
-      # invisible here. This is the actual fix for the
-      # "crates.midn-ecs.src silently dropped" class of bug: previously a fix
-      # landing in DixScript-Rust could sit unused in CI for up to a week.
       - name: Resolve DixScript-Rust master SHA
         id: dixscript-rev
         run: |
@@ -154,9 +155,6 @@ jobs:
           for k in sorted(d.keys()):
               print(f'  {k} = {str(d[k])[:60]}')
           "
-          echo "::group::Full untruncated structure.json"
-          cat /tmp/structure.json
-          echo "::endgroup::"
 
       - name: Convert manifest to JSON (if exists)
         run: |
@@ -193,7 +191,12 @@ jobs:
           STRUCTURE_JSON: /tmp/structure.json
           MANIFEST_JSON:  /tmp/manifest.json
           MAPPINGS_FILE:  ${{ inputs.mappings_file || '' }}
-        run: python3 ${{ steps.script.outputs.path }}
+        run: |
+          if [ "${{ inputs.dump_json }}" == "true" ]; then
+            python3 ${{ steps.script.outputs.path }} --dump-json
+          else
+            python3 ${{ steps.script.outputs.path }}
+          fi
 
       - name: Show git status
         if: ${{ inputs.dry_run != 'true' }}
