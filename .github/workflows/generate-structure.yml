@@ -24,6 +24,10 @@ on:
         description: 'Path to .mdix mappings file for [[key]] substitution (leave blank to skip)'
         required: false
         default: ''
+      clear_cache:
+        description: 'Delete the cached mdix CLI binary before running, forcing a fresh build (true/false)'
+        required: false
+        default: 'false'
   push:
     paths:
       - '.mdix/project_structure/**'
@@ -50,12 +54,17 @@ on:
         required: false
         type: string
         default: ''
+      clear_cache:
+        required: false
+        type: string
+        default: 'false'
 
 jobs:
   generate:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions:  write   # required for `gh cache delete`
 
     steps:
       - name: Checkout repository
@@ -63,6 +72,28 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # ── On-demand cache clear ──────────────────────────────────────────────
+      # No version-bumping the cache key every time the CLI changes. Tick
+      # `clear_cache: true` on a manual run (or pass it through from a
+      # workflow_call) and this deletes every mdix-cli-* cache entry before
+      # the restore step below even runs, so it's guaranteed to miss and
+      # rebuild from source. Safe no-op if there's nothing cached yet.
+      - name: Clear cached mdix CLI binary
+        if: ${{ inputs.clear_cache == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Clearing mdix-cli-* caches for this repo..."
+          ids=$(gh cache list --key mdix-cli- --json id,key --jq '.[] | "\(.id)\t\(.key)"' || true)
+          if [ -z "$ids" ]; then
+            echo "  none found — nothing to clear."
+          else
+            echo "$ids" | while IFS=$'\t' read -r id key; do
+              echo "  deleting $key (id=$id)"
+              gh cache delete "$id" || true
+            done
+          fi
 
       - name: Get weekly cache key
         id: week
