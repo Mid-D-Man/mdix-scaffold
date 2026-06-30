@@ -190,18 +190,75 @@ def resolve_hidden_set(data):
     return hidden_set
 
 
+# ---------------------------------------------------------------------------
+# _flatten_nested_dict_into_groups — defensive fallback for old `to_json`
+#
+# The old DixScript `to_json` serializer reconstructed nested JSON objects
+# from dotted @DATA group paths:
+#
+#   crates.midn-ecs::    →  {"crates": {"midn-ecs": [...]}}
+#   crates.midn-ecs.src:: →  SILENTLY DROPPED because "midn-ecs" was already
+#                             inserted as an Array and can't become an Object.
+#
+# The primary fix is `to_json_flat` in conversion.rs (2026-06-29), which
+# keeps every dotted path as its own flat top-level key so no collision is
+# possible. This helper is a belt-and-suspenders fallback: if a run somehow
+# still produces nested JSON (old cached binary, manual invocation, etc.) we
+# recover whatever levels the old serializer managed to preserve, so at least
+# the top-level group files are created rather than 0 files.
+#
+# Flat keys added by `to_json_flat` always take precedence: we only insert
+# into dir_groups when the dotted key isn't already present.
+# ---------------------------------------------------------------------------
+
+def _flatten_nested_dict_into_groups(prefix, nested, dir_groups):
+    """
+    Recursively walk a nested dict and register every list-of-file-objects
+    leaf as a dir_group entry under its full dotted path.
+
+    e.g.  prefix="crates", nested={"midn-ecs": [{"name":"Cargo",...}]}
+          → dir_groups["crates.midn-ecs"] = {0: {"name":"Cargo",...}}
+    """
+    for key, value in nested.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, list):
+            items = {}
+            for idx, item in enumerate(value):
+                if isinstance(item, dict) and "name" in item:
+                    items[idx] = item
+            if items and full_key not in dir_groups:
+                dir_groups[full_key] = items
+        elif isinstance(value, dict):
+            _flatten_nested_dict_into_groups(full_key, value, dir_groups)
+
+
 def collect_dir_groups(data):
     """
     Collect directory-group entries (arrays of file objects, each with at
-    least a 'name' key) from BOTH JSON formats produced by the DixScript
+    least a 'name' key) from ALL JSON formats produced by the DixScript
     compiler:
-      Array format  (new):  {"src": [{"name": ..., "ext": ..., ...}, ...]}
-      Flat-indexed  (old):  {"src[0]": {...}, "src[1]": {...}}
+
+      Flat array   (current):  {"crates.midn-ecs": [{"name":...}, ...]}
+                                Produced by `to_json_flat` (conversion.rs fix
+                                2026-06-29). Every dotted @DATA path is its own
+                                top-level JSON key — no path can shadow another.
+
+      Flat-indexed (legacy):   {"crates.midn-ecs[0]": {...}, ...}
+                                Older serializer variant that indexed each item.
+
+      Nested dict  (old bug):  {"crates": {"midn-ecs": [...], ...}}
+                                Old `to_json` path that built nested objects
+                                from dotted segments. Silently dropped any group
+                                path that was a prefix of a deeper one (e.g.
+                                "crates.midn-ecs.src" was dropped whenever
+                                "crates.midn-ecs" already existed as an Array).
+                                Handled here as a defensive fallback via
+                                _flatten_nested_dict_into_groups.
     """
     entry_re   = re.compile(r"^(.+)\[(\d+)\]$")
     dir_groups = {}
     for key, value in data.items():
-        # --- New array format ---
+        # --- Flat array format (current / to_json_flat) -----------------------
         if isinstance(value, list):
             if key in RESERVED_PREFIXES:
                 continue
@@ -213,7 +270,17 @@ def collect_dir_groups(data):
                 dir_groups[key] = items
             continue
 
-        # --- Old flat-indexed format ---
+        # --- Nested-object format (old `to_json` fallback) --------------------
+        # `to_json` turned "crates.midn-ecs" into {"crates": {"midn-ecs": [...]}}
+        # which meant collect_dir_groups never saw a list at the top level.
+        # Recursively flatten so we at least recover whatever levels survived
+        # (deeper paths lost to the Array-vs-Object collision are unrecoverable
+        # without the `to_json_flat` binary fix, but top-level groups are saved).
+        if isinstance(value, dict) and key not in RESERVED_PREFIXES:
+            _flatten_nested_dict_into_groups(key, value, dir_groups)
+            continue
+
+        # --- Old flat-indexed format -------------------------------------------
         m = entry_re.match(key)
         if not m:
             continue
