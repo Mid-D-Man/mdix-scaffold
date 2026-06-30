@@ -1,0 +1,49 @@
+# .github/workflows/clear-mdix-cache.yml
+name: Clear mdix CLI cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      key_prefix:
+        description: 'Cache key prefix to match and delete'
+        required: false
+        default: 'mdix-cli-'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: List matching caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREFIX="${{ inputs.key_prefix || 'mdix-cli-' }}"
+          echo "Searching for caches matching '$PREFIX*' in ${{ github.repository }}..."
+          gh cache list --key "$PREFIX" --json id,key,sizeInBytes,createdAt \
+            --jq '.[] | "\(.id)\t\(.key)\t\(.sizeInBytes) bytes\t\(.createdAt)"' \
+            > /tmp/matches.tsv || true
+          if [ ! -s /tmp/matches.tsv ]; then
+            echo "No matching caches found."
+            exit 0
+          fi
+          echo "Found:"
+          column -t -s $'\t' /tmp/matches.tsv
+
+      - name: Delete matching caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -s /tmp/matches.tsv ]; then
+            exit 0
+          fi
+          while IFS=$'\t' read -r id key _; do
+            echo "Deleting $key (id=$id)"
+            gh cache delete "$id" || true
+          done < /tmp/matches.tsv
+          echo "Done."
