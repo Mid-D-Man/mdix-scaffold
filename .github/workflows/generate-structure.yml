@@ -60,27 +60,21 @@ on:
         default: 'false'
 
 jobs:
-  generate:
+  # Split out from `generate` on purpose. `actions: write` is only needed for
+  # `gh cache delete`, and a job's *declared* permissions are checked at
+  # workflow-call validation time regardless of whether the gated step inside
+  # it actually runs. If `actions: write` lived on `generate`, every caller of
+  # this reusable workflow would be forced to grant `actions: write` just to
+  # generate structure, even when clear_cache is never used (the common case).
+  # Keeping it isolated here means callers only need that extra scope on the
+  # rare run where they actually pass clear_cache: true.
+  clear-cache:
+    if: ${{ inputs.clear_cache == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      actions:  write   # required for `gh cache delete`
-
+      actions: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # ── On-demand cache clear ──────────────────────────────────────────────
-      # No version-bumping the cache key every time the CLI changes. Tick
-      # `clear_cache: true` on a manual run (or pass it through from a
-      # workflow_call) and this deletes every mdix-cli-* cache entry before
-      # the restore step below even runs, so it's guaranteed to miss and
-      # rebuild from source. Safe no-op if there's nothing cached yet.
       - name: Clear cached mdix CLI binary
-        if: ${{ inputs.clear_cache == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -94,6 +88,20 @@ jobs:
               gh cache delete "$id" || true
             done
           fi
+
+  generate:
+    needs: clear-cache
+    if: ${{ always() && (needs.clear-cache.result == 'success' || needs.clear-cache.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Get weekly cache key
         id: week
