@@ -1,3 +1,4 @@
+# scripts/generate_structure.py
 #!/usr/bin/env python3
 """
 Generate project structure from a .mdix template.
@@ -63,19 +64,8 @@ def parse_args():
     p.add_argument("--no-cache",    action="store_true", default=False)
     p.add_argument("--verbose", action="store_true",
         default=os.environ.get("VERBOSE", "false").lower() == "true")
-    p.add_argument("--dump-json", action="store_true", default=False,
-        help="Print the full untruncated structure JSON and exit (or continue if verbose)")
-    # ── PASS 1 prune gate ────────────────────────────────────────────────────
-    # OFF by default. The scaffold is a generator, not a sync tool.
-    # Stale-file deletion must be explicitly opted into; it must never happen
-    # as a side-effect of simplifying or patching a template.
     p.add_argument("--prune", action="store_true",
-        default=os.environ.get("PRUNE_STALE", "false").lower() == "true",
-        help=(
-            "Remove manifest-tracked files that are no longer declared in the "
-            "template.  OFF by default — the scaffold never deletes files "
-            "implicitly.  Enable with PRUNE_STALE=true or --prune."
-        ))
+        default=os.environ.get("PRUNE_STALE", "false").lower() == "true")
 
     args = p.parse_args()
     if args.override_stubs:
@@ -110,10 +100,10 @@ STUB_DEFAULTS = {
     "xml":    '<?xml version="1.0" encoding="utf-8"?>\n',
     "html":   "<!DOCTYPE html>\n<html>\n<head><title>{name}</title></head>\n<body>\n</body>\n</html>\n",
     "css":    "/* Auto-generated stub */\n",
-    "svelte": "\n",
+    "svelte": "<!-- Auto-generated stub -->\n",
 }
 
-RESERVED_PREFIXES = {
+RESERVED_KEYS = {
     "hidden_dirs", "delete_files", "rename_files",
     "update_files", "pre_hooks",   "post_hooks",
     "move_files",   "patch_files",
@@ -121,61 +111,146 @@ RESERVED_PREFIXES = {
 
 
 # ---------------------------------------------------------------------------
-# iter_section — handles BOTH JSON formats from the DixScript compiler:
-#   Array format  (new):  {"delete_files": [{...}, ...]}
-#   Flat-indexed  (old):  {"delete_files[0]": {...}, "delete_files[1]": {...}}
+# normalize_data
+#
+# to_json_flat serializes the DixScript flat hashmap verbatim. GroupArray
+# items are stored in that hashmap with [N] suffixes because DixData needs
+# individual-item access (db.get_string("enemies[0].name")). The JSON output
+# therefore looks like:
+#
+#   "crates.midn-ecs[0]": {"name": "Cargo", ...}
+#   "crates.midn-ecs[1]": {"name": "lib",   ...}
+#
+# instead of the natural:
+#
+#   "crates.midn-ecs": [{"name": "Cargo", ...}, {"name": "lib", ...}]
+#
+# This function collapses [N] indexed sibling keys back into proper arrays
+# before any other code touches the data. Everything downstream then works
+# with plain Python lists — no regex detective work, no format branches.
+#
+# Priority rules:
+#   - If a key already exists as a proper list (rare, but possible if a future
+#     CLI version emits clean arrays), it wins and the [N] siblings are ignored.
+#   - [N] indexed entries whose base key is in RESERVED_KEYS are left alone
+#     so the reserved-section helpers can handle them.
+#   - Sub-property entries like "crates.midn-ecs[0].name" are dropped from
+#     the top-level data dict — they're only useful for DixData path access,
+#     not for the scaffold generator.
 # ---------------------------------------------------------------------------
 
-def iter_section(data, prefix):
-    val = data.get(prefix)
+_INDEXED_RE  = re.compile(r"^(.+)\[(\d+)\]$")
+_SUBPROP_RE  = re.compile(r"^(.+)\[\d+\]\..+$")   # key[N].sub — drop
+
+
+def normalize_data(raw: dict) -> dict:
+    """Collapse flat [N] indexed entries into proper Python lists."""
+    result   = {}
+    buckets  = {}   # base_key → {idx: value}
+
+    for key, value in raw.items():
+        # Drop sub-property entries like "enemies[0].name" — not needed here
+        if _SUBPROP_RE.match(key):
+            continue
+
+        m = _INDEXED_RE.match(key)
+        if not m:
+            result[key] = value
+            continue
+
+        base = m.group(1)
+        idx  = int(m.group(2))
+
+        # A proper list already exists at this base key — skip the indexed entry
+        if base in result and isinstance(result[base], list):
+            continue
+
+        if base not in buckets:
+            buckets[base] = {}
+        buckets[base][idx] = value
+
+    # Merge buckets into result as ordered lists (base key wins if already set)
+    for base, items in buckets.items():
+        if base not in result:
+            result[base] = [items[i] for i in sorted(items)]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Section iterators — now trivial because normalize_data already gave us lists
+# ---------------------------------------------------------------------------
+
+def iter_section(data: dict, key: str):
+    """Yield items from a section key. Always a list after normalize_data."""
+    val = data.get(key)
     if isinstance(val, list):
         yield from val
-        return
-    i = 0
-    while True:
-        key = f"{prefix}[{i}]"
-        if key not in data:
-            break
-        yield data[key]
-        i += 1
 
 
-def iter_string_section(data, prefix):
-    val = data.get(prefix)
-    if isinstance(val, list):
-        for item in val:
-            if isinstance(item, str):
-                yield item
-            elif isinstance(item, dict) and "value" in item:
-                yield item["value"]
-        return
-    i = 0
-    while True:
-        key = f"{prefix}[{i}]"
-        if key not in data:
-            break
-        v = data[key]
-        if isinstance(v, str):
-            yield v
-        elif isinstance(v, dict) and "value" in v:
-            yield v["value"]
-        i += 1
+def iter_string_section(data: dict, key: str):
+    for item in iter_section(data, key):
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict) and "value" in item:
+            yield item["value"]
 
 
-def key_to_dir(dotted_key, hidden_set):
+def collect_string_array(data: dict, key: str) -> list:
+    return list(iter_string_section(data, key))
+
+
+# ---------------------------------------------------------------------------
+# Directory groups — one clean pass, no regex, no fallbacks
+#
+# After normalize_data every GroupArray is already a plain list.
+# A key is a dir group when its value is a non-empty list whose items are
+# file-entry dicts (have at least a "name" field) AND the key isn't reserved.
+# ---------------------------------------------------------------------------
+
+def collect_dir_groups(data: dict) -> dict:
+    """
+    Return {dotted_key: {0: entry, 1: entry, ...}} for every GroupArray
+    that represents scaffold files.
+    """
+    groups = {}
+    for key, value in data.items():
+        if key in RESERVED_KEYS:
+            continue
+        if not isinstance(value, list):
+            continue
+        items = {
+            i: item for i, item in enumerate(value)
+            if isinstance(item, dict) and "name" in item
+        }
+        if items:
+            groups[key] = items
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Filesystem helpers
+# ---------------------------------------------------------------------------
+
+def resolve_hidden_set(data: dict) -> set:
+    hidden = set()
+    for entry in iter_section(data, "hidden_dirs"):
+        if isinstance(entry, dict) and "segment" in entry:
+            hidden.add(entry["segment"].strip())
+    return hidden
+
+
+def key_to_dir(dotted_key: str, hidden_set: set) -> str:
     if dotted_key == "root":
         return ""
     parts    = dotted_key.split(".")
     fs_parts = []
     for idx, part in enumerate(parts):
-        if idx == 0 and part in hidden_set:
-            fs_parts.append("." + part)
-        else:
-            fs_parts.append(part)
+        fs_parts.append(("." + part) if idx == 0 and part in hidden_set else part)
     return "/".join(fs_parts)
 
 
-def assemble_filename(entry):
+def assemble_filename(entry: dict):
     name = entry.get("name", "").strip()
     ext  = entry.get("ext",  "").strip()
     if not name:
@@ -183,70 +258,7 @@ def assemble_filename(entry):
     return f"{name}.{ext}" if ext else name
 
 
-def resolve_hidden_set(data):
-    hidden_set = set()
-    for entry in iter_section(data, "hidden_dirs"):
-        if isinstance(entry, dict) and "segment" in entry:
-            hidden_set.add(entry["segment"].strip())
-    return hidden_set
-
-
-# ---------------------------------------------------------------------------
-# _flatten_nested_dict_into_groups — defensive fallback for old `to_json`
-# ---------------------------------------------------------------------------
-
-def _flatten_nested_dict_into_groups(prefix, nested, dir_groups):
-    for key, value in nested.items():
-        full_key = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, list):
-            items = {}
-            for idx, item in enumerate(value):
-                if isinstance(item, dict) and "name" in item:
-                    items[idx] = item
-            if items and full_key not in dir_groups:
-                dir_groups[full_key] = items
-        elif isinstance(value, dict):
-            _flatten_nested_dict_into_groups(full_key, value, dir_groups)
-
-
-def collect_dir_groups(data):
-    entry_re   = re.compile(r"^(.+)\[(\d+)\]$")
-    dir_groups = {}
-    for key, value in data.items():
-        # --- Flat array format (current / to_json_flat) -----------------------
-        if isinstance(value, list):
-            if key in RESERVED_PREFIXES:
-                continue
-            items = {}
-            for idx, item in enumerate(value):
-                if isinstance(item, dict) and "name" in item:
-                    items[idx] = item
-            if items:
-                dir_groups[key] = items
-            continue
-
-        # --- Nested-object format (old `to_json` fallback) --------------------
-        if isinstance(value, dict) and key not in RESERVED_PREFIXES:
-            _flatten_nested_dict_into_groups(key, value, dir_groups)
-            continue
-
-        # --- Old flat-indexed format -------------------------------------------
-        m = entry_re.match(key)
-        if not m:
-            continue
-        if not isinstance(value, dict) or "name" not in value:
-            continue
-        dir_key = m.group(1)
-        if dir_key in RESERVED_PREFIXES:
-            continue
-        idx = int(m.group(2))
-        if dir_key not in dir_groups:
-            dir_groups[dir_key] = {}
-        dir_groups[dir_key][idx] = value
-    return dir_groups
-
-
-def build_all_current(data, dir_groups, hidden_set):
+def build_all_current(data: dict, dir_groups: dict, hidden_set: set) -> set:
     all_current = set()
 
     for dir_key, items in dir_groups.items():
@@ -283,18 +295,17 @@ def build_all_current(data, dir_groups, hidden_set):
     return all_current
 
 
-def collect_string_array(data, prefix):
-    return list(iter_string_section(data, prefix))
+# ---------------------------------------------------------------------------
+# Manifest
+# ---------------------------------------------------------------------------
 
-
-def load_manifest(manifest_json_path, current_template=None):
+def load_manifest(manifest_json_path: str, current_template: str = None) -> set:
     previously_created = set()
     if not os.path.exists(manifest_json_path):
         return previously_created
-
     try:
         with open(manifest_json_path) as fh:
-            mdata = json.load(fh)
+            mdata = normalize_data(json.load(fh))
 
         manifest_template = mdata.get("template", "")
         if current_template and manifest_template:
@@ -316,25 +327,65 @@ def load_manifest(manifest_json_path, current_template=None):
     return previously_created
 
 
-def run_hooks(hooks, hook_type="pre", dry_run=False):
-    if not hooks:
-        return True
-    for cmd in hooks:
-        print(f"  [{hook_type}-hook] {cmd}")
-        if dry_run:
-            print("           (skipped — dry run)")
-            continue
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if result.stdout.strip():
-            print(f"           stdout: {result.stdout.strip()}")
-        if result.stderr.strip():
-            print(f"           stderr: {result.stderr.strip()}")
-        if result.returncode != 0:
-            print(f"  ERROR: {hook_type}-hook failed (exit {result.returncode}): {cmd}",
-                  file=sys.stderr)
-            return False
-    return True
+def write_manifest(
+    template_path, previously_created,
+    created, overridden, updated, deleted, renamed, moved, skipped,
+    dry_run,
+):
+    if dry_run:
+        return
 
+    os.makedirs(".mdix", exist_ok=True)
+
+    template_hash = ""
+    if os.path.exists(template_path):
+        with open(template_path, "rb") as tf:
+            template_hash = hashlib.sha256(tf.read()).hexdigest()[:12]
+
+    all_tracked = previously_created | set(created) | set(overridden) | set(updated)
+    all_tracked -= set(deleted)
+    for from_p, to_p in renamed:
+        all_tracked.discard(from_p)
+        all_tracked.add(to_p)
+    for from_p, to_p in moved:
+        all_tracked.discard(from_p)
+        all_tracked.add(to_p)
+    all_tracked = sorted(all_tracked)
+
+    files_block = "\n    ".join(f'"{p}"' for p in all_tracked) if all_tracked else ""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    manifest_content = (
+        "@CONFIG(\n"
+        f'  version    -> "1.0.0"\n'
+        f'  generated  -> "{ts}"\n'
+        f'  debug_mode -> "off"\n'
+        ")\n\n"
+        "@DATA(\n"
+        f'  template      = "{template_path}"\n'
+        f'  template_hash = "{template_hash}"\n'
+        f'  last_run      = "{ts}"\n'
+        f'  new_this_run  = {len(created)}\n'
+        f'  overridden    = {len(overridden)}\n'
+        f'  skipped       = {len(skipped)}\n'
+        f'  deleted       = {len(deleted)}\n'
+        f'  renamed       = {len(renamed)}\n'
+        f'  moved         = {len(moved)}\n'
+        f'  updated       = {len(updated)}\n'
+        "\n"
+        "  created_files::\n"
+        f"    {files_block}\n"
+        ")\n"
+    )
+
+    with open(".mdix/.manifest.mdix", "w") as mf:
+        mf.write(manifest_content)
+    print(f"\n  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
+
+
+# ---------------------------------------------------------------------------
+# File handling
+# ---------------------------------------------------------------------------
 
 def handle_existing_file(filepath, new_content, args):
     strategy = args.file_strategy
@@ -380,10 +431,8 @@ def handle_existing_file(filepath, new_content, args):
 def process_content(raw_content, name_part, ext_part, mappings, args):
     if raw_content == "":
         raw_content = STUB_DEFAULTS.get(ext_part, "").replace("{name}", name_part)
-
     if _HAS_REMOTE:
         raw_content = resolve_content(raw_content, verbose=args.verbose)
-
     if mappings and _HAS_MAPPINGS:
         placeholders = list_placeholders(raw_content)
         if placeholders and args.verbose:
@@ -391,70 +440,32 @@ def process_content(raw_content, name_part, ext_part, mappings, args):
             if missing:
                 print(f"  NOTE: unmapped placeholders: {missing}")
         raw_content = apply_mappings(raw_content, mappings)
-
     return raw_content
 
 
-def write_manifest(
-    template_path,
-    previously_created,
-    created, overridden, updated, deleted, renamed, moved, skipped,
-    dry_run,
-):
-    if dry_run:
-        return
+def run_hooks(hooks, hook_type="pre", dry_run=False):
+    if not hooks:
+        return True
+    for cmd in hooks:
+        print(f"  [{hook_type}-hook] {cmd}")
+        if dry_run:
+            print("           (skipped — dry run)")
+            continue
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.stdout.strip():
+            print(f"           stdout: {result.stdout.strip()}")
+        if result.stderr.strip():
+            print(f"           stderr: {result.stderr.strip()}")
+        if result.returncode != 0:
+            print(f"  ERROR: {hook_type}-hook failed (exit {result.returncode}): {cmd}",
+                  file=sys.stderr)
+            return False
+    return True
 
-    os.makedirs(".mdix", exist_ok=True)
 
-    template_hash = ""
-    if os.path.exists(template_path):
-        with open(template_path, "rb") as tf:
-            template_hash = hashlib.sha256(tf.read()).hexdigest()[:12]
-
-    all_tracked = previously_created | set(created) | set(overridden) | set(updated)
-    all_tracked -= set(deleted)
-    for from_p, to_p in renamed:
-        all_tracked.discard(from_p)
-        all_tracked.add(to_p)
-    for from_p, to_p in moved:
-        all_tracked.discard(from_p)
-        all_tracked.add(to_p)
-    all_tracked = sorted(all_tracked)
-
-    files_block = (
-        "\n    ".join(f'"{p}"' for p in all_tracked)
-        if all_tracked else ""
-    )
-
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    manifest_content = (
-        "@CONFIG(\n"
-        f'  version    -> "1.0.0"\n'
-        f'  generated  -> "{ts}"\n'
-        f'  debug_mode -> "off"\n'
-        ")\n\n"
-        "@DATA(\n"
-        f'  template      = "{template_path}"\n'
-        f'  template_hash = "{template_hash}"\n'
-        f'  last_run      = "{ts}"\n'
-        f'  new_this_run  = {len(created)}\n'
-        f'  overridden    = {len(overridden)}\n'
-        f'  skipped       = {len(skipped)}\n'
-        f'  deleted       = {len(deleted)}\n'
-        f'  renamed       = {len(renamed)}\n'
-        f'  moved         = {len(moved)}\n'
-        f'  updated       = {len(updated)}\n'
-        "\n"
-        "  created_files::\n"
-        f"    {files_block}\n"
-        ")\n"
-    )
-
-    with open(".mdix/.manifest.mdix", "w") as mf:
-        mf.write(manifest_content)
-    print(f"\n  Manifest → .mdix/.manifest.mdix  (tracking {len(all_tracked)} file(s))")
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def run(args):
     if args.clear_cache:
@@ -463,14 +474,12 @@ def run(args):
         return
 
     with open(args.structure_json) as fh:
-        data = json.load(fh)
+        raw = json.load(fh)
 
-    if args.dump_json or args.verbose:
-        print("\n=== Full Untruncated JSON Data ===")
-        print(json.dumps(data, indent=2))
-        print("==================================\n")
-        if args.dump_json and not args.verbose:
-            return  # Exit early if only --dump-json was requested without --verbose
+    # Collapse [N] indexed flat entries back into proper arrays.
+    # This is the single point where CLI format quirks are absorbed —
+    # everything downstream works with plain Python lists and dicts.
+    data = normalize_data(raw)
 
     previously_created = load_manifest(args.manifest_json, current_template=args.template)
 
@@ -479,7 +488,6 @@ def run(args):
     dir_groups = collect_dir_groups(data)
     pre_hooks  = collect_string_array(data, "pre_hooks")
     post_hooks = collect_string_array(data, "post_hooks")
-
     all_current = build_all_current(data, dir_groups, hidden_set)
 
     print(f"Project        : {os.path.basename(os.getcwd())}")
@@ -502,6 +510,7 @@ def run(args):
         if not run_hooks(pre_hooks, "pre", args.dry_run):
             sys.exit(1)
 
+    # ── PASS 1: prune stale manifest-tracked files ─────────────────────────
     deleted      = []
     stale        = sorted(previously_created - all_current)
 
@@ -523,11 +532,10 @@ def run(args):
                     os.remove(fp)
                 deleted.append(fp)
                 print(f"  DEL  {fp}")
-            elif os.path.isdir(fp):
-                print(f"  ---  {fp}  (directory — skipped; use delete_files or post_hooks)")
             else:
                 print(f"  ---  {fp}  (not found — already gone)")
 
+    # ── PASS 2a: delete explicitly listed files ─────────────────────────────
     header_shown = False
     for entry in iter_section(data, "delete_files"):
         if not isinstance(entry, dict) or "path" not in entry:
@@ -545,11 +553,10 @@ def run(args):
                 os.remove(path)
             deleted.append(path)
             print(f"  DEL  {path}")
-        elif os.path.isdir(path):
-            print(f"  ---  {path}  (is a directory — use post_hooks: rm -rf to remove)")
         else:
             print(f"  ---  {path}  (not found, skipped)")
 
+    # ── PASS 2b: rename files ────────────────────────────────────────────────
     renamed      = []
     header_shown = False
     for entry in iter_section(data, "rename_files"):
@@ -572,6 +579,7 @@ def run(args):
         else:
             print(f"  ---  {from_path}  (not found, skipped)")
 
+    # ── PASS 2c: move files / directories ────────────────────────────────────
     moved        = []
     header_shown = False
     for entry in iter_section(data, "move_files"):
@@ -597,6 +605,7 @@ def run(args):
         else:
             print(f"  ---  {from_path}  (not found, skipped)")
 
+    # ── PASS 3: create / skip / override scaffold files ──────────────────────
     created    = []
     skipped    = []
     overridden = []
@@ -615,8 +624,8 @@ def run(args):
             print(f"  DIR  {dir_path}/")
 
         for idx in sorted(items.keys()):
-            entry        = items[idx]
-            filename     = assemble_filename(entry)
+            entry         = items[idx]
+            filename      = assemble_filename(entry)
             if not filename:
                 continue
 
@@ -647,6 +656,7 @@ def run(args):
                 created.append(filepath)
                 print(f"  NEW  {filepath}")
 
+    # ── PASS 4: update file contents ─────────────────────────────────────────
     updated      = []
     header_shown = False
     for entry in iter_section(data, "update_files"):
@@ -686,6 +696,7 @@ def run(args):
         updated.append(file_path)
         print(f"  {'UPD' if existed_before else 'NEW'}  {file_path}")
 
+    # ── PASS 5: surgical file patches ────────────────────────────────────────
     patched      = []
     patch_errors = []
     header_shown = False
@@ -722,13 +733,8 @@ def run(args):
     write_manifest(
         template_path=args.template,
         previously_created=previously_created,
-        created=created,
-        overridden=overridden,
-        updated=updated,
-        deleted=deleted,
-        renamed=renamed,
-        moved=moved,
-        skipped=skipped,
+        created=created, overridden=overridden, updated=updated,
+        deleted=deleted, renamed=renamed, moved=moved, skipped=skipped,
         dry_run=args.dry_run,
     )
 
