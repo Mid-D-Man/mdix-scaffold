@@ -1,0 +1,38 @@
+// Brought to u by MidManStudio
+// FILE: .mdix/replacements/replacements.mdix
+//
+// Third template kind, alongside project_structure.mdix and patch.mdix.
+// Every OTHER file in this same folder is real, verbatim content under its
+// real target filename — no DixScript string-escaping. Drop a file here,
+// it either overwrites the same-named file under target_root or creates it
+// if none exists yet. This manifest only holds config, never per-file
+// content declarations.
+
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  // Explicit filename -> exact path. Wins outright, no search performed.
+  // Required whenever a filename would otherwise match more than one file
+  // under target_root (the pass errors on ambiguity rather than guessing).
+  ~target<object>(name, path) { return { name = name, path = path } }
+)
+
+@DATA(
+  // Where to search for a same-named file to replace. Required.
+  target_root = "src"
+
+  // Files in this folder that are NOT replacements — e.g. a README
+  // documenting the folder itself. The manifest is always excluded
+  // automatically; dotfiles (.DS_Store etc.) are always skipped too.
+  ignore::
+    "README.md"
+
+  // Resolve ambiguous filenames, or place a brand-new file somewhere
+  // specific instead of directly under target_root.
+  overrides::
+    target("Hero.svelte", "src/lib/components/Hero.svelte")
+)
