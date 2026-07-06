@@ -10,33 +10,47 @@
 
 ---
 
-## Two Template Kinds — Fixed Names, Fixed Paths
+## Three Template Kinds — Fixed Names, Fixed Paths
 
-There are exactly two kinds of `.mdix` template, and the name/path for each is not negotiable — tooling, manifest tracking, and this skill all assume them:
+There are exactly three kinds of `.mdix` template, and the name/path for each is not negotiable — tooling, manifest tracking, and this skill all assume them:
 
 | Kind | Path | Purpose |
 |---|---|---|
 | Structure generation | `.mdix/project_structure/project_structure.mdix` | Scaffold a project from scratch / keep its shape in sync |
 | Patch | `.mdix/patches/patch.mdix` | One-off surgical fix to an existing repo (moves, renames, content edits) |
+| Replacements | `.mdix/replacements/replacements.mdix` | Drop real files in, get them dropped into the target tree — no content escaping |
 
-Never invent a different filename or folder for either kind. If a repo needs more than one patch over time, that's still one `patch.mdix` — overwrite its contents for the next surgical pass, it isn't meant to accumulate as a history.
+Never invent a different filename or folder for any of the three. If a repo needs more than one patch over time, that's still one `patch.mdix` — overwrite its contents for the next surgical pass, it isn't meant to accumulate as a history.
+
+Replacements is the odd one out: unlike the other two, the manifest doesn't declare per-file content at all. Every *other* file sitting in `.mdix/replacements/` next to `replacements.mdix` IS real, verbatim content under its real target filename. Reach for this instead of `update_files::`/`fc()` whenever the content is more than a short config file — a full component, a stylesheet, anything where escaping it into a DixScript string would be unreadable. See "Replacements Templates" below for the full mechanism.
 
 ---
 
-## File Layout (in the consuming repo).mdix/
-project_structure/
-project_structure.mdix ← structure template
-templates/
-rust-lib.mdix ← example named template
-patches/
-patch.mdix ← one-off surgical fixes
-env/
-mappings.mdix ← [[key]] substitution values
-.manifest.mdix ← auto-generated; tracks created files (shared, template-scoped — see Manifests below)
+## File Layout (in the consuming repo)
+
+```
+.mdix/
+  project_structure/
+    project_structure.mdix     ← structure template
+    templates/
+      rust-lib.mdix             ← example named template
+  patches/
+    patch.mdix                  ← one-off surgical fixes
+  replacements/
+    replacements.mdix           ← config only: target_root, ignore::, overrides::
+    Hero.svelte                 ← real file, real name — dropped in verbatim
+    tokens.css                  ← ditto
+  env/
+    mappings.mdix                ← [[key]] substitution values
+  .manifest.mdix                 ← auto-generated; tracks created files (shared, template-scoped — see Manifests below)
 .github/
-workflows/
-run-structure.yml ← calls the reusable workflow for project_structure.mdix
-run-patch.yml ← calls the reusable workflow for patch.mdix**Rule: never hand off a `.mdix` template without its workflow.** If the consuming repo doesn't already have the matching `.github/workflows/*.yml`, write it in the same response as the template. A template nobody can run isn't a finished deliverable.
+  workflows/
+    run-structure.yml            ← calls the reusable workflow for project_structure.mdix
+    run-patch.yml                ← calls the reusable workflow for patch.mdix
+    run-replacements.yml         ← calls the reusable workflow for replacements.mdix
+```
+
+**Rule: never hand off a `.mdix` template without its workflow.** If the consuming repo doesn't already have the matching `.github/workflows/*.yml`, write it in the same response as the template. A template nobody can run isn't a finished deliverable.
 
 ---
 
@@ -195,6 +209,50 @@ update_files::
 - Always overwrites, even if file already exists
 - Creates the file if it doesn't exist yet
 - Runs after scaffold creation, before patches
+
+---
+
+## Replacements Templates
+
+A different kind of template from the other two — the manifest holds config only, never per-file content. Every *other* file sitting in `.mdix/replacements/` next to `replacements.mdix` is real, verbatim content under its real target filename.
+
+```dixscript
+// .mdix/replacements/replacements.mdix
+@CONFIG(
+  version    -> "1.0.0"
+  features   -> "data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~target<object>(name, path) { return { name = name, path = path } }
+)
+
+@DATA(
+  target_root = "src"
+
+  ignore::
+    "README.md"
+
+  overrides::
+    target("Hero.svelte", "src/lib/components/Hero.svelte")
+)
+```
+
+**Detection is by path, not content** — same convention as the other two kinds. A manifest is only treated as a replacements template when it's literally named `replacements.mdix` inside a folder literally named `replacements/`. Anywhere else, `target_root` is just an ordinary `@DATA` key with no special meaning.
+
+**Per-file resolution, in order:**
+1. **`overrides::`** — an explicit `name -> path` entry always wins outright. No search performed. This is also the *only* way to resolve an ambiguous filename.
+2. **Search `target_root`** — walked recursively for a file with the same basename as the replacement file:
+   - **Exactly one match** → overwritten, respecting `--file-strategy` / `--diff` / `--dry-run` exactly like `update_files::`.
+   - **Zero matches** → created at `target_root/<basename>`.
+   - **More than one match** → hard error, nothing written for that file. Fix it with an `overrides::` entry — don't rename the replacement file to dodge the collision, since the whole point is the filename matching what's already there.
+
+**Always excluded from candidates**, no config needed: the manifest itself, and any dotfile (`.DS_Store` etc.). Use `ignore::` for anything else that isn't a replacement (a `README.md` documenting the folder, say).
+
+**When to reach for this instead of `update_files::`/`fc()`:** anything beyond a short config file. A full Svelte/React component, a stylesheet, a whole source file — escaping that into a DixScript string is unreadable and error-prone. Drop the real file in, name it exactly what it should be named at the destination, done.
+
+**Companion workflow:** `run-replacements.yml`, same non-negotiable rule as the other two kinds — see the GitHub Actions section below.
 
 ---
 
@@ -519,6 +577,56 @@ jobs:
 
 If `--prune` is ever exposed as a workflow input, it follows the exact same pattern: `type: choice`, options `['false', 'true']`, default `'false'`.
 
+### Replacements template
+
+Same reusable workflow again — `target_root`/`ignore::`/`overrides::` all live in the manifest itself, so the workflow only needs `template`, `dry_run`, and `file_strategy`. No `override_stubs` (there's no stub concept in this template kind).
+
+```yaml
+# .github/workflows/run-replacements.yml
+name: Apply replacements
+
+on:
+  workflow_dispatch:
+    inputs:
+      template:
+        description: 'Path to .mdix replacements manifest'
+        required: false
+        default: '.mdix/replacements/replacements.mdix'
+      dry_run:
+        description: 'true = preview only. false = actually write + commit.'
+        required: false
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+      file_strategy:
+        description: 'How to handle files that already exist at the resolved target'
+        required: false
+        type: choice
+        default: 'overwrite'
+        options:
+          - 'overwrite'
+          - 'skip'
+          - 'backup'
+          - 'rename'
+  push:
+    paths:
+      - '.mdix/replacements/**'
+
+jobs:
+  replace:
+    uses: Mid-D-Man/mdix-scaffold/.github/workflows/generate-structure.yml@main
+    permissions:
+      contents: write
+    with:
+      template:      ${{ inputs.template || '.mdix/replacements/replacements.mdix' }}
+      dry_run:       ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+      file_strategy: ${{ inputs.file_strategy || 'overwrite' }}
+```
+
+Note the default `file_strategy` here is `overwrite`, not `skip` like the other two — a replacements manifest exists specifically to overwrite the matched file, so defaulting to `skip` would silently defeat its own purpose on every run until someone noticed.
+
 ---
 
 ## Stub Defaults (what `f(name, ext)` produces)
@@ -551,5 +659,8 @@ If `--prune` is ever exposed as a workflow input, it follows the exact same patt
 - **Free-text string inputs instead of `type: choice`** for true/false or enum-like workflow_dispatch inputs.
 - **Letting an automatic `push` trigger write or commit anything.** Gate `dry_run` on `github.event_name == 'workflow_dispatch'`; force `'true'` for every other trigger.
 - **Pasting the full QuickFuncs reference into every template.** Define only what that template's `@DATA` actually calls.
+- **Renaming a replacement file to dodge an ambiguous-match error.** The whole point is the filename matching what's already on disk — resolve the collision with an `overrides::` entry instead, don't rename around it.
+- **Forking `generate-structure.yml` and forgetting `lib_replacements.py` in the support-libs loop.** It's fetched alongside `generate_structure.py` from a hardcoded list in that workflow; a fork that adds new `.mdix` machinery has to extend that same list or it 404s for consuming repos.
+- **Expecting a dotfile in `.mdix/replacements/` to be picked up.** Dotfiles are always filtered out of candidates, no config for it — same as the manifest itself always being excluded.
 - **Wrong template name or path.** Patches are always `.mdix/patches/patch.mdix`; structure generation is always `.mdix/project_structure/project_structure.mdix`. Don't invent alternatives.
 - **Shipping a `.mdix` template without its companion workflow `.yml`.** If one doesn't already exist in the repo, write it in the same response.
