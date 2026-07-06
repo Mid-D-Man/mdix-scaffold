@@ -40,6 +40,12 @@ try:
 except ImportError:
     _HAS_PATCH = False
 
+try:
+    import lib_replacements
+    _HAS_REPLACEMENTS = True
+except ImportError:
+    _HAS_REPLACEMENTS = False
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Generate project structure from a .mdix template.")
@@ -480,6 +486,19 @@ def run(args):
     # This is the single point where CLI format quirks are absorbed —
     # everything downstream works with plain Python lists and dicts.
     data = normalize_data(raw)
+
+    # A replacements manifest (.mdix/replacements/replacements.mdix) is a
+    # different template kind entirely — detected by its fixed path, not by
+    # content, same convention as project_structure.mdix / patch.mdix having
+    # their own fixed paths. It skips the whole directory-group / staleness
+    # pipeline below and runs its own pass instead.
+    if (os.path.basename(args.template) == "replacements.mdix"
+            and os.path.basename(os.path.dirname(args.template)) == "replacements"):
+        if not _HAS_REPLACEMENTS:
+            print("ERROR: lib_replacements.py not found alongside generate_structure.py — "
+                  "cannot run a replacements manifest.", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(lib_replacements.run_replacements(data, args.template, args))
 
     previously_created = load_manifest(args.manifest_json, current_template=args.template)
 
