@@ -125,7 +125,7 @@ jobs:
       - name: Resolve support libs
         run: |
           SCRIPT_DIR=$(dirname "${{ steps.script.outputs.path }}")
-          for lib in lib_remote.py lib_mappings.py lib_patch.py; do
+          for lib in lib_remote.py lib_mappings.py lib_patch.py lib_replacements.py; do
             if [ -f "scripts/$lib" ]; then
               [ "$SCRIPT_DIR" != "scripts" ] && cp "scripts/$lib" "$SCRIPT_DIR/$lib"
               echo "  local   $lib"
