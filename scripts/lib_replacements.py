@@ -7,18 +7,26 @@ A replacements manifest lives at a fixed path:
 
     .mdix/replacements/replacements.mdix
 
-Every other file sitting in that same folder IS real, verbatim content under
-its real target filename — no DixScript string-escaping required. This module:
+Every other file sitting under that same folder IS real, verbatim content
+under its real target filename — no DixScript string-escaping required.
+Files can sit flat next to the manifest, or nested in subdirectories:
 
-  1. Lists every file next to the manifest, excluding the manifest itself,
-     dotfiles, and anything named in `ignore::`.
-  2. For each file, checks `overrides::` first — an explicit filename -> path
-     entry always wins outright, no search performed.
-  3. Otherwise walks `target_root` for a file with the same basename:
-       - exactly one match  -> overwrite it (respects --file-strategy/--diff/
-         --dry-run, same as the update_files pass)
-       - zero matches       -> create it at target_root/<basename>
-       - multiple matches   -> hard error; must be resolved via `overrides::`
+  - Flat file (no subdirectory): resolved by basename search under
+    target_root, same as before.
+      - exactly one match  -> overwrite it (respects --file-strategy/--diff/
+        --dry-run, same as the update_files pass)
+      - zero matches       -> create it at target_root/<basename>
+      - multiple matches   -> hard error; must be resolved via `overrides::`
+        or by moving the file into a subdirectory here (see below)
+
+  - Nested file (sits in a subdirectory here): its relative path under
+    replacements/ IS the target path under target_root, directly — no
+    search, no ambiguity possible. This is what lets multiple files share a
+    basename (e.g. `sse2/mat4.rs` and `neon/mat4.rs` side by side) without
+    needing an override:: entry for each one.
+
+  - `overrides::` always wins outright over either of the above, checked
+    against both the file's bare basename and its full relative path.
 
 This module is intentionally self-contained (no imports from
 generate_structure.py) to avoid a circular import, since generate_structure.py
@@ -68,6 +76,36 @@ def find_target_matches(target_root: str, filename: str) -> list:
         if filename in filenames:
             matches.append(os.path.join(dirpath, filename))
     return sorted(matches)
+
+
+def collect_candidates(replacements_dir: str, ignore_names: set) -> list:
+    """
+    Walk replacements_dir recursively. Returns relative paths (forward-slash,
+    relative to replacements_dir) for every real file, skipping dotfiles/dirs
+    and anything named in ignore_names (checked against both the bare
+    basename and the full relative path, so ignore:: entries written either
+    way still work).
+
+    A file found directly inside replacements_dir (no subdirectory component)
+    is "flat" — resolved the original way, by basename search under
+    target_root. A file found inside a subdirectory is "nested" — its
+    relative path IS the target path under target_root directly, no search,
+    no ambiguity possible (this is what lets multiple files share a basename,
+    e.g. sse2/mat4.rs and neon/mat4.rs side by side, as long as they sit in
+    matching subdirectories here).
+    """
+    candidates = []
+    for dirpath, dirnames, filenames in os.walk(replacements_dir):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for f in filenames:
+            if f.startswith("."):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, f), replacements_dir)
+            rel = rel.replace(os.sep, "/")
+            if f in ignore_names or rel in ignore_names:
+                continue
+            candidates.append(rel)
+    return sorted(candidates)
 
 
 def _handle_existing(filepath, new_content, args):
@@ -145,12 +183,7 @@ def run_replacements(data: dict, template_path: str, args) -> int:
     pre_hooks        = collect_string_array(data, "pre_hooks")
     post_hooks       = collect_string_array(data, "post_hooks")
 
-    candidates = sorted(
-        f for f in os.listdir(replacements_dir)
-        if os.path.isfile(os.path.join(replacements_dir, f))
-        and f not in ignore_names
-        and not f.startswith(".")
-    )
+    candidates = collect_candidates(replacements_dir, ignore_names)
 
     print(f"Replacements   : {replacements_dir}")
     print(f"Target root    : {target_root}")
@@ -166,25 +199,36 @@ def run_replacements(data: dict, template_path: str, args) -> int:
 
     created, replaced, errors = [], [], []
 
-    for filename in candidates:
-        src_path = os.path.join(replacements_dir, filename)
+    for rel_path in candidates:
+        src_path = os.path.join(replacements_dir, *rel_path.split("/"))
         with open(src_path) as fh:
             content = fh.read()
 
-        if filename in overrides:
-            dest = overrides[filename]
+        basename = os.path.basename(rel_path)
+        is_nested = "/" in rel_path
+
+        if rel_path in overrides:
+            dest = overrides[rel_path]
+        elif basename in overrides:
+            dest = overrides[basename]
+        elif is_nested:
+            # Relative path under replacements/ IS the target path under
+            # target_root, directly — no search, can't be ambiguous.
+            dest = os.path.join(target_root, *rel_path.split("/"))
         else:
-            matches = find_target_matches(target_root, filename)
+            matches = find_target_matches(target_root, basename)
             if len(matches) > 1:
-                errors.append(filename)
-                print(f"  ERR  {filename}  — ambiguous, {len(matches)} matches under "
+                errors.append(rel_path)
+                print(f"  ERR  {rel_path}  — ambiguous, {len(matches)} matches under "
                       f"{target_root}:", file=sys.stderr)
                 for m in matches:
                     print(f"         {m}", file=sys.stderr)
-                print(f"         Resolve with:  overrides:: target(\"{filename}\", "
-                      f"\"<exact path>\")", file=sys.stderr)
+                print(f"         Resolve with:  overrides:: target(\"{basename}\", "
+                      f"\"<exact path>\")  —  or just move this file into a "
+                      f"subdirectory here that mirrors its real location.",
+                      file=sys.stderr)
                 continue
-            dest = matches[0] if matches else os.path.join(target_root, filename)
+            dest = matches[0] if matches else os.path.join(target_root, basename)
 
         if os.path.exists(dest):
             status, wrote = _handle_existing(dest, content, args)
