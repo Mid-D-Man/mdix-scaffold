@@ -27,6 +27,27 @@ Files can sit flat next to the manifest, or nested in subdirectories:
 
   - `overrides::` always wins outright over either of the above, checked
     against both the file's bare basename and its full relative path.
+    IMPORTANT: this check happens *before* the nested-path check, so an
+    override keyed by a bare basename (e.g. "Cargo.toml") will also catch
+    any *nested* file that happens to share that basename, not just a flat
+    one — if your replacement set has multiple files with the same
+    basename, only key an override by a name that's actually unique across
+    the whole replacements tree (rename the flat file on disk here if you
+    have to; the override's `path` is what controls its real destination).
+
+  - Archive file (`.tar.gz`, `.tgz`, `.tar`, or `.zip`, anywhere in this
+    tree, flat or nested): NOT copied as a literal file. It's extracted
+    into a temporary staging area at the exact position it occupies in the
+    tree, and its internal contents are then treated as ordinary
+    candidates — same flat/nested resolution rules as above, recursively
+    (an archive containing another archive gets extracted again). This
+    exists so a whole replacement set can be delivered as one file where
+    committing dozens of individual files isn't practical (e.g. from a
+    mobile client with no local shell to run `tar xzf` first) — drop
+    `replacements.mdix` and one `.tar.gz` next to it, nothing else. See
+    `stage_replacements_dir()` below for the extraction mechanics and the
+    path-traversal safety checks — archive contents are untrusted input
+    and are validated before any extraction happens, not after.
 
 This module is intentionally self-contained (no imports from
 generate_structure.py) to avoid a circular import, since generate_structure.py
@@ -40,7 +61,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import zipfile
+
+ARCHIVE_EXTENSIONS = (".tar.gz", ".tgz", ".tar", ".zip")
 
 
 def iter_section(data: dict, key: str):
@@ -108,7 +134,163 @@ def collect_candidates(replacements_dir: str, ignore_names: set) -> list:
     return sorted(candidates)
 
 
+def _is_archive(filename: str) -> bool:
+    return filename.lower().endswith(ARCHIVE_EXTENSIONS)
+
+
+def _member_is_safe(dest_dir: str, member_path: str) -> bool:
+    """
+    Standard "zip slip"/tar path-traversal check: rejects an absolute
+    member path outright, then resolves the member against dest_dir and
+    confirms the result is still inside dest_dir. Archive contents are
+    untrusted input (they could have come from anywhere before landing in
+    a commit) — this runs BEFORE extraction, on every member, not as a
+    post-hoc cleanup after something's already been written to disk.
+    """
+    if os.path.isabs(member_path) or member_path.startswith(("/", "\\")):
+        return False
+    dest_abs = os.path.normpath(os.path.abspath(dest_dir))
+    resolved = os.path.normpath(os.path.abspath(os.path.join(dest_dir, member_path)))
+    return resolved == dest_abs or resolved.startswith(dest_abs + os.sep)
+
+
+def _extract_archive_safely(archive_path: str, dest_dir: str) -> None:
+    """
+    Validates every member of the archive before extracting anything — an
+    archive that fails validation raises ValueError with nothing written,
+    rather than extracting the safe members and silently skipping the
+    unsafe ones. Symlinks/hardlinks in tar archives are rejected outright
+    too, since a symlink is itself a path-traversal vector independent of
+    where its own archive entry name points.
+    """
+    lower = archive_path.lower()
+    if lower.endswith(".zip"):
+        with zipfile.ZipFile(archive_path) as zf:
+            for name in zf.namelist():
+                if not _member_is_safe(dest_dir, name):
+                    raise ValueError(
+                        f"archive member '{name}' in {os.path.basename(archive_path)} "
+                        f"resolves outside the replacements folder — refusing to extract "
+                        f"(path-traversal attempt)"
+                    )
+            zf.extractall(dest_dir)
+    else:
+        mode = "r:gz" if lower.endswith((".tar.gz", ".tgz")) else "r:"
+        with tarfile.open(archive_path, mode) as tf:
+            for member in tf.getmembers():
+                if member.issym() or member.islnk():
+                    raise ValueError(
+                        f"archive member '{member.name}' in {os.path.basename(archive_path)} "
+                        f"is a symlink/hardlink — refusing to extract (path-traversal risk)"
+                    )
+                if not _member_is_safe(dest_dir, member.name):
+                    raise ValueError(
+                        f"archive member '{member.name}' in {os.path.basename(archive_path)} "
+                        f"resolves outside the replacements folder — refusing to extract "
+                        f"(path-traversal attempt)"
+                    )
+            tf.extractall(dest_dir)
+
+
+def stage_replacements_dir(replacements_dir: str, ignore_names: set):
+    """
+    Builds a temporary staging copy of replacements_dir: every ordinary
+    file is copied across as-is, and every archive file (anywhere in the
+    tree, flat or nested — see ARCHIVE_EXTENSIONS) is extracted into the
+    staging copy at the exact position the archive itself occupies, so its
+    internal paths become real nested files exactly as if they'd been
+    committed individually. Extraction recurses via a work queue — an
+    archive containing another archive gets extracted again, since the
+    inner archive is just another file the next queue entry walks over.
+
+    This NEVER modifies replacements_dir itself: the archive is neither
+    deleted nor extracted in place. Two consequences, both intentional:
+      - Idempotent. Re-running later re-extracts from the same
+        still-present archive — nothing to accidentally lose track of.
+      - Naturally dry-run-safe, with zero special-casing needed elsewhere.
+        The staging copy is thrown away either way (see the returned
+        cleanup callable); a real run only ever writes to target_root,
+        exactly like every other candidate already does.
+
+    Returns (staging_dir, cleanup, extracted_archive_rel_paths). Always
+    call cleanup() when done, success or failure — wrap the caller in
+    try/finally, not just a straight-line call.
+
+    Raises ValueError (propagated from _extract_archive_safely) if any
+    archive fails its path-traversal check — nothing is left half-staged
+    in that case; the partial staging_dir is removed before raising.
+    """
+    staging_dir = tempfile.mkdtemp(prefix="mdix-replacements-")
+    extracted = []
+
+    def cleanup():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    # Work queue of (source_dir, dest_dir, apply_ignore, copy_needed) tuples.
+    # apply_ignore is only True for the original replacements_dir itself —
+    # ignore:: entries are meant for what's committed there, not for an
+    # archive's internal paths, which are a separate namespace. copy_needed
+    # is False when src_root and dest_root are the same directory (the
+    # rescan-for-nested-archives pass below) — those files are already
+    # exactly where they need to be; copying them onto themselves would
+    # both be pointless and raise shutil.SameFileError.
+    queue = [(replacements_dir, staging_dir, True, True)]
+
+    try:
+        while queue:
+            src_root, dest_root, apply_ignore, copy_needed = queue.pop()
+            for dirpath, dirnames, filenames in os.walk(src_root):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                rel_dir = os.path.relpath(dirpath, src_root)
+                dest_dir = dest_root if rel_dir == "." else os.path.join(dest_root, rel_dir)
+                if copy_needed:
+                    os.makedirs(dest_dir, exist_ok=True)
+
+                for f in filenames:
+                    if f.startswith("."):
+                        continue
+                    rel = os.path.normpath(os.path.join(rel_dir, f)).replace(os.sep, "/")
+                    if rel.startswith("./"):
+                        rel = rel[2:]
+                    if apply_ignore and (f in ignore_names or rel in ignore_names):
+                        continue
+
+                    src = os.path.join(dirpath, f)
+                    if _is_archive(f):
+                        _extract_archive_safely(src, dest_dir)
+                        extracted.append(rel)
+                        if not copy_needed:
+                            # This archive was itself sitting in staging as
+                            # a byproduct of a PARENT extraction (nested
+                            # archive-within-archive case) — remove it now
+                            # that its contents are extracted alongside it,
+                            # or the next rescan pass would keep
+                            # rediscovering and re-extracting it forever.
+                            # (Top-level archives never reach here: they're
+                            # sourced directly from replacements_dir, which
+                            # is never touched — see copy_needed's docstring
+                            # note above.)
+                            os.remove(src)
+                        queue.append((dest_dir, dest_dir, False, False))
+                    elif copy_needed:
+                        shutil.copy2(src, os.path.join(dest_dir, f))
+                    # else: copy_needed is False, meaning this file is
+                    # already sitting in staging from a prior extraction —
+                    # nothing to do but leave it there.
+    except Exception:
+        cleanup()
+        raise
+
+    return staging_dir, cleanup, extracted
+
+
 def _handle_existing(filepath, new_content, args):
+    """
+    Returns (status_string, wrote: bool). `wrote` means "the replacement
+    content is what's at filepath now" — every branch that returns
+    wrote=True must actually put new_content there (respecting
+    args.dry_run), not just perform its side effect and report success.
+    """
     strategy = args.file_strategy
 
     if getattr(args, "diff", False):
@@ -134,18 +316,38 @@ def _handle_existing(filepath, new_content, args):
             print("  WARNING: --file-strategy=backup requires --backup <dir>; skipping",
                   file=sys.stderr)
             return "skipped (no backup dir)", False
-        os.makedirs(args.backup, exist_ok=True)
-        backup_dest = os.path.join(args.backup, os.path.basename(filepath))
+        # Mirror filepath's relative structure under the backup dir rather
+        # than flattening to its basename — multiple candidates can
+        # legitimately share a basename (that's the whole point of nested
+        # replacement paths: three different crates can each have their
+        # own Cargo.toml), and backing all of them up to the same flat
+        # backups/Cargo.toml would silently keep only the last one
+        # processed, discarding the rest with no error or warning.
+        if os.path.isabs(filepath):
+            backup_dest = os.path.join(args.backup, os.path.basename(filepath))
+        else:
+            backup_dest = os.path.join(args.backup, filepath.lstrip("./"))
         if not args.dry_run:
+            backup_parent = os.path.dirname(backup_dest)
+            if backup_parent:
+                os.makedirs(backup_parent, exist_ok=True)
             shutil.copy2(filepath, backup_dest)
-        return f"backed up -> {backup_dest}", True
+            with open(filepath, "w") as fh:
+                fh.write(new_content)
+        return f"backed up -> {backup_dest}, then overwritten", True
 
     if strategy == "rename":
         new_name = f"{filepath}.{int(time.time())}"
         if not args.dry_run:
             os.rename(filepath, new_name)
-        return f"renamed -> {new_name}", True
+            with open(filepath, "w") as fh:
+                fh.write(new_content)
+        return f"renamed old -> {new_name}, wrote new at original path", True
 
+    # strategy == "overwrite" (the default)
+    if not args.dry_run:
+        with open(filepath, "w") as fh:
+            fh.write(new_content)
     return "overwritten", True
 
 
@@ -183,77 +385,96 @@ def run_replacements(data: dict, template_path: str, args) -> int:
     pre_hooks        = collect_string_array(data, "pre_hooks")
     post_hooks       = collect_string_array(data, "post_hooks")
 
-    candidates = collect_candidates(replacements_dir, ignore_names)
+    # Stage into a temp copy so any archives sitting in replacements_dir
+    # (see ARCHIVE_EXTENSIONS / stage_replacements_dir's docstring above)
+    # get extracted before candidate collection, without ever touching
+    # replacements_dir itself — everything below reads from staging_dir,
+    # not replacements_dir, from this point on.
+    try:
+        staging_dir, cleanup, extracted_archives = stage_replacements_dir(replacements_dir, ignore_names)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
-    print(f"Replacements   : {replacements_dir}")
-    print(f"Target root    : {target_root}")
-    print(f"Overrides      : {len(overrides)}")
-    print(f"Candidates     : {len(candidates)}")
-    print()
+    try:
+        candidates = collect_candidates(staging_dir, ignore_names)
 
-    if pre_hooks:
-        print("=== Pre-hooks ===")
+        print(f"Replacements   : {replacements_dir}")
+        if extracted_archives:
+            print(f"Archives       : {len(extracted_archives)} extracted (staged only, "
+                  f"not written back to replacements/)")
+            for a in extracted_archives:
+                print(f"                 {a}")
+        print(f"Target root    : {target_root}")
+        print(f"Overrides      : {len(overrides)}")
+        print(f"Candidates     : {len(candidates)}")
         print()
-        if not _run_hooks(pre_hooks, "pre", args.dry_run):
-            return 1
 
-    created, replaced, errors = [], [], []
+        if pre_hooks:
+            print("=== Pre-hooks ===")
+            print()
+            if not _run_hooks(pre_hooks, "pre", args.dry_run):
+                return 1
 
-    for rel_path in candidates:
-        src_path = os.path.join(replacements_dir, *rel_path.split("/"))
-        with open(src_path) as fh:
-            content = fh.read()
+        created, replaced, errors = [], [], []
 
-        basename = os.path.basename(rel_path)
-        is_nested = "/" in rel_path
+        for rel_path in candidates:
+            src_path = os.path.join(staging_dir, *rel_path.split("/"))
+            with open(src_path) as fh:
+                content = fh.read()
 
-        if rel_path in overrides:
-            dest = overrides[rel_path]
-        elif basename in overrides:
-            dest = overrides[basename]
-        elif is_nested:
-            # Relative path under replacements/ IS the target path under
-            # target_root, directly — no search, can't be ambiguous.
-            dest = os.path.join(target_root, *rel_path.split("/"))
-        else:
-            matches = find_target_matches(target_root, basename)
-            if len(matches) > 1:
-                errors.append(rel_path)
-                print(f"  ERR  {rel_path}  — ambiguous, {len(matches)} matches under "
-                      f"{target_root}:", file=sys.stderr)
-                for m in matches:
-                    print(f"         {m}", file=sys.stderr)
-                print(f"         Resolve with:  overrides:: target(\"{basename}\", "
-                      f"\"<exact path>\")  —  or just move this file into a "
-                      f"subdirectory here that mirrors its real location.",
-                      file=sys.stderr)
-                continue
-            dest = matches[0] if matches else os.path.join(target_root, basename)
+            basename = os.path.basename(rel_path)
+            is_nested = "/" in rel_path
 
-        if os.path.exists(dest):
-            status, wrote = _handle_existing(dest, content, args)
-            print(f"  {'REP' if wrote else '---'}  {dest}  ({status})")
-            if wrote:
-                replaced.append(dest)
-        else:
-            if not args.dry_run:
-                parent = os.path.dirname(dest)
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-                with open(dest, "w") as fh:
-                    fh.write(content)
-            created.append(dest)
-            print(f"  NEW  {dest}")
+            if rel_path in overrides:
+                dest = overrides[rel_path]
+            elif basename in overrides:
+                dest = overrides[basename]
+            elif is_nested:
+                # Relative path under replacements/ IS the target path under
+                # target_root, directly — no search, can't be ambiguous.
+                dest = os.path.join(target_root, *rel_path.split("/"))
+            else:
+                matches = find_target_matches(target_root, basename)
+                if len(matches) > 1:
+                    errors.append(rel_path)
+                    print(f"  ERR  {rel_path}  — ambiguous, {len(matches)} matches under "
+                          f"{target_root}:", file=sys.stderr)
+                    for m in matches:
+                        print(f"         {m}", file=sys.stderr)
+                    print(f"         Resolve with:  overrides:: target(\"{basename}\", "
+                          f"\"<exact path>\")  —  or just move this file into a "
+                          f"subdirectory here that mirrors its real location.",
+                          file=sys.stderr)
+                    continue
+                dest = matches[0] if matches else os.path.join(target_root, basename)
 
-    if post_hooks:
+            if os.path.exists(dest):
+                status, wrote = _handle_existing(dest, content, args)
+                print(f"  {'REP' if wrote else '---'}  {dest}  ({status})")
+                if wrote:
+                    replaced.append(dest)
+            else:
+                if not args.dry_run:
+                    parent = os.path.dirname(dest)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    with open(dest, "w") as fh:
+                        fh.write(content)
+                created.append(dest)
+                print(f"  NEW  {dest}")
+
+        if post_hooks:
+            print()
+            print("=== Post-hooks ===")
+            print()
+            _run_hooks(post_hooks, "post", args.dry_run)
+
+        skipped = len(candidates) - len(created) - len(replaced) - len(errors)
         print()
-        print("=== Post-hooks ===")
-        print()
-        _run_hooks(post_hooks, "post", args.dry_run)
+        print(f"Done. {len(created)} created, {len(replaced)} replaced, "
+              f"{skipped} skipped, {len(errors)} error(s).")
 
-    skipped = len(candidates) - len(created) - len(replaced) - len(errors)
-    print()
-    print(f"Done. {len(created)} created, {len(replaced)} replaced, "
-          f"{skipped} skipped, {len(errors)} error(s).")
-
-    return 1 if errors else 0
+        return 1 if errors else 0
+    finally:
+        cleanup()
