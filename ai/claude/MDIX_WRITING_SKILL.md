@@ -55,6 +55,8 @@ Compiler settings and metadata. All entries use `->` arrow syntax.
 
 `features` controls which sections the compiler activates. For scaffold templates, always use `"quickfuncs,data"`.
 
+> **This is a hard compile error, not a silent skip.** `@QUICKFUNCS`, `@ENUMS`, `@DLM`, and `@IMPORTS` each require their own keyword present in `features` (or the single keyword `advanced`, which unlocks all four at once) — verified straight from the parser (`general_parser.rs`: `is_section_allowed` / `parse_section_inner`, and mirrored again in `general_semantics_analyzer.rs`). `@DATA` and `@SECURITY` are the only two sections always allowed regardless of `features`. Adding or removing a section is a **two-part edit, not one**: the section itself, and `features` in the same pass. Before calling a `.mdix` file done, list every section actually present top-to-bottom and check each one (other than DATA/SECURITY) has its keyword in `features`. A file with a `@QUICKFUNCS` block and `features -> "data"` will fail with `@QUICKFUNCS is not allowed with current feature settings` — the block's contents are never even looked at.
+
 ---
 
 ## @IMPORTS
@@ -576,6 +578,7 @@ Don't paste this whole block into every template — see the scaffold skill's "o
 
 ## Common Mistakes
 
+- **Adding a section without updating `features` in the same edit.** `@QUICKFUNCS`/`@ENUMS`/`@DLM`/`@IMPORTS` each need their keyword in `features` (or `advanced`) — this is the single most common mistake when hand-writing or editing a `.mdix` file, precisely because the section content itself can be 100% correct and it'll still hard-fail. Treat every section add/remove as also touching the `features` line — never one without the other.
 - **Commas inside horizontal object/array literals are required.** `{ x = 1 y = 2 }` on one line is a parse error. Use `{ x = 1, y = 2 }`. Vertical layout is the one place this loosens — see Comma Rules.
 - **Commas in function calls are required.** `func(a b)` is a parse error. Use `func(a, b)`.
 - **Kebab identifiers in `@QUICKFUNCS` are parsed as subtraction.** Use snake_case inside `@QUICKFUNCS`.
