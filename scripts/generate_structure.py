@@ -676,13 +676,29 @@ def run(args):
                 print(f"  NEW  {filepath}")
 
     # ── PASS 4: update file contents ─────────────────────────────────────────
+    #
+    # update_files is deliberately unconditional by default — it exists for
+    # things a template wants force-synced every run (CI badges, version
+    # stamps, generated config) regardless of local edits, and PASS 3's
+    # skip/override negotiation was never meant to apply to it. That's fine
+    # until an entry targets a file meant to be created once and then
+    # hand-edited (e.g. a facade lib.rs) — at that point "unconditional"
+    # becomes "silently destroys real work on every trigger", which is what
+    # happened to msx's src/lib.rs via its project_structure.mdix template.
+    #
+    # Fix: an entry can opt in to respecting file_strategy/override_stubs via
+    # `respect_strategy = true` (default false). Every existing update_files
+    # entry in every other template keeps its current, unconditional-write
+    # behavior unless a template author explicitly asks for protection on
+    # that specific entry.
     updated      = []
     header_shown = False
     for entry in iter_section(data, "update_files"):
         if not isinstance(entry, dict) or "path" not in entry:
             continue
-        file_path   = entry["path"].strip()
-        new_content = entry.get("content", "")
+        file_path        = entry["path"].strip()
+        new_content_raw  = entry.get("content", "")
+        respect_strategy = bool(entry.get("respect_strategy", False))
         if not file_path:
             continue
         if not header_shown:
@@ -691,9 +707,20 @@ def run(args):
             print()
             header_shown = True
 
-        new_content = process_content(new_content, "", "", mappings, args)
+        new_content    = process_content(new_content_raw, "", "", mappings, args)
+        existed_before = os.path.exists(file_path)
 
-        if args.diff and os.path.exists(file_path):
+        if existed_before and respect_strategy:
+            label, should_write = handle_existing_file(file_path, new_content, args)
+            if not should_write:
+                skipped.append(file_path)
+                print(f"  ---  {file_path}  ({label})")
+                continue
+            # handle_existing_file already performed any backup/rename side
+            # effect as part of deciding should_write — fall through to the
+            # normal write below, same as PASS 3 does.
+
+        if args.diff and existed_before:
             with open(file_path) as f:
                 old_content = f.read()
             diff = list(difflib.unified_diff(
@@ -705,7 +732,6 @@ def run(args):
             if diff:
                 print("".join(diff), end="")
 
-        existed_before = os.path.exists(file_path)
         if not args.dry_run:
             parent = os.path.dirname(file_path)
             if parent:
