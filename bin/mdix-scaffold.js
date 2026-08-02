@@ -4,7 +4,8 @@
  *
  * Requirements:
  *   - Python 3  (python3 or python)
- *   - mdix CLI on PATH (built from DixScript-Rust)
+ *   - midmanstudio-mdix installed  (pip install -r scripts/requirements.txt,
+ *     or run `mdix-scaffold setup`) — pre-built wheels, no Rust toolchain.
  *   - Node.js >= 18
  *
  * Usage:
@@ -15,6 +16,7 @@
  *   mdix-scaffold convert  [template]
  *   mdix-scaffold templates
  *   mdix-scaffold clear-cache
+ *   mdix-scaffold setup
  */
 
 "use strict";
@@ -26,9 +28,7 @@ const fs   = require("fs");
 const PKG_ROOT    = path.resolve(__dirname, "..");
 const SCRIPTS_DIR = path.join(PKG_ROOT, "scripts");
 
-const DEFAULT_TEMPLATE  = ".mdix/project_structure/project_structure.mdix";
-const DEFAULT_JSON_OUT  = "/tmp/mdix_structure.json";
-const DEFAULT_MANIFEST  = "/tmp/mdix_manifest.json";
+const DEFAULT_TEMPLATE = ".mdix/project_structure/project_structure.mdix";
 
 // ---------------------------------------------------------------------------
 // Detect Python
@@ -41,24 +41,6 @@ function findPython() {
   console.error(
     "ERROR: Python 3 not found.\n" +
     "Install Python 3 and ensure it is on PATH as 'python3' or 'python'."
-  );
-  process.exit(1);
-}
-
-// ---------------------------------------------------------------------------
-// Detect mdix CLI
-// ---------------------------------------------------------------------------
-
-function findMdix() {
-  if (spawnSync("mdix", ["--version"], { encoding: "utf8" }).status === 0) return "mdix";
-  const local = path.join(PKG_ROOT, "bin", "mdix");
-  if (fs.existsSync(local)) return local;
-  console.error(
-    "ERROR: 'mdix' CLI not found on PATH.\n" +
-    "Build it:\n" +
-    "  git clone https://github.com/Mid-D-Man/DixScript-Rust.git\n" +
-    "  cd DixScript-Rust && cargo build -p mdix-cli --release\n" +
-    "  cp target/release/mdix /usr/local/bin/mdix"
   );
   process.exit(1);
 }
@@ -107,6 +89,9 @@ function parseArgs(argv) {
       case "--override-stubs":     flags.overrideStubs = true;  break;
       case "--verbose":            flags.verbose       = true;  break;
       case "--no-cache":           flags.noCache       = true;  break;
+      case "--no-validate":        flags.noValidate    = true;  break;
+      case "--dump-json":          flags.dumpJson      = true;  break;
+      case "--force":              flags.force         = true;  break;
       case "--help": case "-h":    flags.help          = true;  break;
       case "--version": case "-v": flags.version       = true;  break;
       case "--template":  case "-t": flags.template      = rest[++i]; break;
@@ -117,7 +102,7 @@ function parseArgs(argv) {
       case "--file-strategy":        flags.fileStrategy  = rest[++i]; break;
       case "--backup":               flags.backup        = rest[++i]; break;
       case "--repo":                 flags.repo          = rest[++i]; break;
-      case "--branch":               flags.branch        = rest[++i]; break;
+      case "--branch":                flags.branch        = rest[++i]; break;
       case "--commit":               flags.commit        = rest[++i]; break;
       default:
         if (!a.startsWith("-")) positional.push(a);
@@ -141,32 +126,40 @@ COMMANDS
   generate     Create / update files from a .mdix template
   nuke         Remove all generated files
   snapshot     Write a plain-text directory layout snapshot
-  validate     Validate a .mdix template  (requires mdix CLI)
-  convert      Convert a .mdix template to JSON (requires mdix CLI)
+  validate     Validate a .mdix template
+  convert      Convert a .mdix template to JSON (inspection only)
   templates    List available project templates
   clear-cache  Clear the remote-content cache (~/.mdix-scaffold/cache/)
+  setup        Install midmanstudio-mdix (pip — no Rust toolchain needed)
   help         Show this message
 
 GENERATE OPTIONS
   --template, -t  <path>     Path to .mdix template
                              (default: ${DEFAULT_TEMPLATE})
-  --mappings, -m  <file>     YAML/JSON file for [[key]] substitution in content
+  --mappings, -m  <file>     .mdix/.json file for [[key]] substitution in content
   --dry-run                  Preview without writing anything
   --diff                     Show unified diffs alongside --dry-run
   --override-stubs           Alias for --file-strategy overwrite
   --file-strategy <s>        skip | overwrite | backup | rename  (default: skip)
   --backup        <dir>      Backup directory when --file-strategy=backup
   --no-cache                 Skip remote-content cache
+  --no-validate               Skip strict [Error]-diagnostic checking on load
+  --dump-json                 Print the loaded template as JSON before generating
   --verbose                  Print remote fetches and mapping substitutions
-  --json          <path>     Path for converted structure JSON
-setup        Install the mdix CLI binary from source (requires Rust/cargo)
-               --force    Rebuild even if already installed
+
 NUKE OPTIONS
   --confirm DELETE           Required safety flag
   --template, -t  <path>    Same template used to generate
 
 SNAPSHOT OPTIONS
   --output, -o <path>        Output file (default: others/ProjectStructure.txt)
+
+CONVERT OPTIONS
+  --output, -o <path>        Write JSON here instead of stdout
+  --no-validate               Skip strict [Error]-diagnostic checking on load
+
+SETUP OPTIONS
+  --force                     Reinstall midmanstudio-mdix even if already present
 
 EXAMPLES
   # Generate with default template
@@ -176,7 +169,7 @@ EXAMPLES
   mdix-scaffold generate --template .mdix/project_structure/templates/rust-lib.mdix
 
   # Generate with mappings file (substitutes [[key]] placeholders)
-  mdix-scaffold generate --mappings .mdix/env/mappings.yaml
+  mdix-scaffold generate --mappings .mdix/env/mappings.mdix
 
   # Dry run + show diffs
   mdix-scaffold generate --dry-run --diff
@@ -192,6 +185,9 @@ EXAMPLES
 
   # Clear cached remote files
   mdix-scaffold clear-cache
+
+  # First-time setup
+  mdix-scaffold setup
 `;
 
 // ---------------------------------------------------------------------------
@@ -200,27 +196,9 @@ EXAMPLES
 
 function cmdGenerate(flags, positional) {
   const template = flags.template || positional[0] || DEFAULT_TEMPLATE;
-  const jsonPath = flags.json     || DEFAULT_JSON_OUT;
-  const mdix     = findMdix();
 
-  console.log(`\n→ Validating: ${template}`);
-  run(mdix, ["validate", template]);
+  const pyArgs = ["--template", template];
 
-  console.log(`\n→ Converting to JSON: ${jsonPath}`);
-  run(mdix, ["convert", template, "--to", "json", "-o", jsonPath]);
-
-  if (fs.existsSync(".mdix/.manifest.mdix")) {
-    console.log("\n→ Reading manifest...");
-    run(mdix, ["convert", ".mdix/.manifest.mdix", "--to", "json", "-o", DEFAULT_MANIFEST]);
-  }
-
-  console.log("\n→ Generating project structure...");
-
-  const pyArgs = ["--template", template, "--structure-json", jsonPath];
-
-  if (fs.existsSync(DEFAULT_MANIFEST)) {
-    pyArgs.push("--manifest-json", DEFAULT_MANIFEST);
-  }
   if (flags.dryRun)        pyArgs.push("--dry-run");
   if (flags.diff)          pyArgs.push("--diff");
   if (flags.overrideStubs) pyArgs.push("--override-stubs");
@@ -229,34 +207,30 @@ function cmdGenerate(flags, positional) {
   if (flags.mappings)      pyArgs.push("--mappings",      flags.mappings);
   if (flags.verbose)       pyArgs.push("--verbose");
   if (flags.noCache)       pyArgs.push("--no-cache");
+  if (flags.noValidate)    pyArgs.push("--no-validate");
+  if (flags.dumpJson)      pyArgs.push("--dump-json");
 
+  console.log("\n→ Generating project structure...");
   runPy("generate_structure.py", pyArgs);
 }
+
 function cmdSetup(flags) {
   const pyArgs = [];
-  if (flags.force || process.argv.includes("--force")) pyArgs.push("--force");
+  if (flags.force) pyArgs.push("--force");
   runPy("setup_mdix.py", pyArgs);
 }
+
 function cmdNuke(flags, positional) {
   if (!flags.confirm) {
     console.error("ERROR: --confirm DELETE is required.");
     process.exit(1);
   }
   const template = flags.template || positional[0] || DEFAULT_TEMPLATE;
-  const jsonPath = flags.json     || DEFAULT_JSON_OUT;
-  const mdix     = findMdix();
-
-  console.log(`\n→ Validating: ${template}`);
-  run(mdix, ["validate", template]);
-
-  console.log(`\n→ Converting to JSON: ${jsonPath}`);
-  run(mdix, ["convert", template, "--to", "json", "-o", jsonPath]);
 
   console.log("\n→ Removing generated files...");
   runPy("nuke_structure.py", [
-    "--confirm",        flags.confirm,
-    "--template",       template,
-    "--structure-json", jsonPath,
+    "--confirm",  flags.confirm,
+    "--template", template,
   ]);
 }
 
@@ -271,17 +245,18 @@ function cmdSnapshot(flags) {
 
 function cmdValidate(flags, positional) {
   const template = flags.template || positional[0] || DEFAULT_TEMPLATE;
-  console.log(`\n→ Validating: ${template}`);
-  run(findMdix(), ["validate", template]);
-  console.log("Validation passed.");
+  const pyArgs = ["--template", template, "--validate-only"];
+  if (flags.noValidate) pyArgs.push("--no-validate");
+  runPy("generate_structure.py", pyArgs);
 }
 
 function cmdConvert(flags, positional) {
   const template = flags.template || positional[0] || DEFAULT_TEMPLATE;
-  const jsonPath = flags.json     || DEFAULT_JSON_OUT;
-  console.log(`\n→ Converting ${template} → ${jsonPath}`);
-  run(findMdix(), ["convert", template, "--to", "json", "-o", jsonPath]);
-  console.log(`Done: ${jsonPath}`);
+  const outputPath = flags.output || flags.json;
+  const pyArgs = [template];
+  if (outputPath)       pyArgs.push("--output", outputPath);
+  if (flags.noValidate) pyArgs.push("--no-validate");
+  runPy("convert_mdix.py", pyArgs);
 }
 
 function cmdTemplates() {
@@ -313,7 +288,7 @@ function cmdTemplates() {
     "\nUsage:\n" +
     "  mdix-scaffold generate --template <path>\n\n" +
     "With mappings (replaces [[key]] placeholders):\n" +
-    "  mdix-scaffold generate --template <path> --mappings .mdix/env/mappings.yaml"
+    "  mdix-scaffold generate --template <path> --mappings .mdix/env/mappings.mdix"
   );
 }
 
@@ -342,12 +317,12 @@ function main() {
   switch (cmd) {
     case "generate":    cmdGenerate(flags, positional);  break;
     case "nuke":        cmdNuke(flags, positional);      break;
-    case "snapshot":    cmdSnapshot(flags);              break;
+    case "snapshot":    cmdSnapshot(flags);               break;
     case "validate":    cmdValidate(flags, positional);  break;
     case "convert":     cmdConvert(flags, positional);   break;
     case "templates":   cmdTemplates();                  break;
     case "clear-cache": cmdClearCache();                 break;
-      case "setup":       cmdSetup(flags);             break;
+    case "setup":       cmdSetup(flags);                 break;
     default:
       console.error(`Unknown command: '${cmd}'\nRun 'mdix-scaffold help' for usage.`);
       process.exit(1);
