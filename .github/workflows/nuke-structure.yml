@@ -28,32 +28,18 @@ jobs:
           fi
           echo "Confirmation accepted."
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Get weekly cache key
-        id: week
-        run: echo "key=$(date -u '+%Y-%U')" >> "$GITHUB_OUTPUT"
-
-      - name: Cache mdix CLI binary
-        id: cache-mdix
-        uses: actions/cache@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: ~/.mdix-bin
-          key: mdix-cli-${{ runner.os }}-${{ steps.week.outputs.key }}
-          restore-keys: mdix-cli-${{ runner.os }}-
+          python-version: '3.x'
 
-      - name: Build mdix CLI (cache miss only)
-        if: steps.cache-mdix.outputs.cache-hit != 'true'
+      - name: Install midmanstudio-mdix
         run: |
-          git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
-          cd /tmp/dixscript
-          cargo build -p mdix-cli --release
-          mkdir -p ~/.mdix-bin
-          cp target/release/mdix ~/.mdix-bin/mdix
-
-      - name: Install mdix to PATH
-        run: sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
+          if [ -f "scripts/requirements.txt" ]; then
+            pip install -r scripts/requirements.txt
+          else
+            pip install midmanstudio-mdix
+          fi
 
       - name: Resolve nuke script
         id: script
@@ -70,20 +56,26 @@ jobs:
             echo "Using fetched script."
           fi
 
-      - name: Validate and convert template
+      - name: Resolve support libs
         run: |
-          TMPL="${{ github.event.inputs.template }}"
-          mdix validate "$TMPL"
-          mdix convert "$TMPL" --to json -o /tmp/structure.json
+          SCRIPT_DIR=$(dirname "${{ steps.script.outputs.path }}")
+          for lib in lib_mdix_load.py; do
+            if [ -f "scripts/$lib" ]; then
+              [ "$SCRIPT_DIR" != "scripts" ] && cp "scripts/$lib" "$SCRIPT_DIR/$lib"
+              echo "  local   $lib"
+            else
+              curl -fsSL \
+                "https://raw.githubusercontent.com/Mid-D-Man/mdix-scaffold/main/scripts/$lib" \
+                -o "$SCRIPT_DIR/$lib"
+              echo "  fetched $lib"
+            fi
+          done
 
       - name: Remove generated files
-        env:
-          STRUCTURE_JSON: /tmp/structure.json
         run: |
           python3 ${{ steps.script.outputs.path }} \
             --confirm DELETE \
-            --template "${{ github.event.inputs.template }}" \
-            --structure-json /tmp/structure.json
+            --template "${{ github.event.inputs.template }}"
 
       - name: Show git status
         run: git status --short || true
