@@ -31,6 +31,10 @@ on:
         description: 'Preview without writing (true/false)'
         required: false
         default: 'false'
+      mappings_file:
+        description: 'Path to .mdix/.json mappings file for [[key]] substitution'
+        required: false
+        default: ''
   push:
     paths:
       - '.mdix/**'
@@ -44,7 +48,16 @@ jobs:
       template:       '.mdix/project_structure/project_structure.mdix'
       override_stubs: ${{ inputs.override_stubs || 'false' }}
       dry_run:        ${{ inputs.dry_run || 'false' }}
+      mappings_file:  ${{ inputs.mappings_file || '' }}
 ```
+
+> **If `[[key]]` placeholders aren't being substituted:** this is almost
+> always a wiring gap, not a content problem — `mappings_file` has to be
+> declared as a `workflow_dispatch` input *and* forwarded in the `with:`
+> block above, or it silently resolves to empty and every placeholder is
+> left untouched with no error anywhere. Older copies of this snippet
+> (before this note was added) omitted `mappings_file` entirely — if
+> yours predates this, add both lines shown above.
 
 Then add your `.mdix/project_structure/project_structure.mdix` and push.
 The workflow triggers automatically on every push to that path.
@@ -410,6 +423,128 @@ No patch operation will crash the whole run — errors are reported and that op 
 
 ---
 
+## Replacements template (archive-based file swap-in)
+
+The third `.mdix` template kind, alongside `project_structure` and `patch`.
+Use this to drop in a batch of *already-written, real files* — swap in a
+finished component, vendor a set of platform-specific implementations,
+replace generated boilerplate with hand-written code — without writing
+`content = "..."` strings anywhere.
+
+A replacements manifest always lives at a fixed path:
+
+```
+.mdix/replacements/replacements.mdix
+```
+
+Every **other** file sitting in that same folder (or a subfolder of it) IS
+real, verbatim content under its real target filename — no DixScript
+string-escaping. The manifest only holds config: where to look, what to
+skip, and how to resolve ambiguity. Trigger it the same way as any other
+template:
+
+```bash
+node bin/mdix-scaffold.js generate --template .mdix/replacements/replacements.mdix
+```
+
+or via the `run-replacements.yml` reusable workflow, which triggers
+automatically on every push under `.mdix/replacements/**`.
+
+### `@DATA` fields
+
+```dixscript
+@DATA(
+  target_root = "src"          // required — where to search for a same-named file
+
+  ignore::                     // files in this folder that are NOT replacements
+    "README.md"                // (the manifest itself is always excluded automatically;
+                                //  dotfiles are always skipped too)
+
+  overrides::                  // resolve ambiguous filenames, or place a brand-new
+    target("Hero.svelte", "src/lib/components/Hero.svelte")   // file somewhere specific
+
+  pre_hooks::  "echo starting"
+  post_hooks:: "cargo fmt"
+)
+```
+
+### How each file resolves to a target path
+
+- **Flat** (sits directly in `replacements/`, no subfolder): resolved by
+  basename search under `target_root`.
+  - exactly one match → overwrite it (respects `--file-strategy` /
+    `--diff` / `--dry-run`, same as the `update_files` pass)
+  - zero matches → create it at `target_root/<basename>`
+  - multiple matches → hard error; resolve with an `overrides::` entry, or
+    move the file into a subdirectory here instead (see Nested, below)
+
+- **Nested** (sits in a subfolder of `replacements/`): its relative path
+  under `replacements/` IS the target path under `target_root`, directly —
+  no search, no ambiguity possible. This is what lets multiple files share
+  a basename (e.g. `sse2/mat4.rs` and `neon/mat4.rs` side by side) without
+  needing an `overrides::` entry for each one.
+
+- **`overrides::`** always wins outright over either of the above, checked
+  against both the file's bare basename and its full relative path. This
+  check happens *before* the nested-path check — an override keyed by a
+  bare basename (e.g. `"Cargo.toml"`) will also catch any nested file that
+  happens to share that basename. If your replacement set has multiple
+  files with the same basename, only key an override by a name that's
+  actually unique across the whole replacements tree.
+
+### Archives (`.zip`, `.tar.gz`, `.tgz`, `.tar`)
+
+Any archive file, anywhere in the `replacements/` tree (flat or nested),
+is **not** copied as a literal file — it's extracted into a temporary
+staging area at the exact position it occupies in the tree, and its
+internal contents are then treated as ordinary candidates under the same
+flat/nested resolution rules above, recursively (an archive containing
+another archive gets extracted again). This exists so a whole replacement
+set can be delivered as one file where committing dozens of individual
+files isn't practical — e.g. from a mobile client with no local shell to
+run `tar xzf` first. Drop `replacements.mdix` and one `.tar.gz` next to
+it, nothing else.
+
+The original archive in `replacements/` is never touched — not deleted,
+not extracted in place. Every run re-extracts fresh into a throwaway temp
+directory, so re-running is idempotent and `--dry-run` needs no special
+casing.
+
+**Safety:** archive contents are untrusted input and are validated
+*before* any extraction happens, not after — every member is checked for
+path-traversal (`../` escapes, absolute paths) and symlinks/hardlinks are
+rejected outright. An archive that fails validation raises an error with
+nothing written, rather than extracting the safe members and silently
+skipping the unsafe ones.
+
+### Real example
+
+```
+.mdix/replacements/
+├── replacements.mdix
+└── Hero.svelte          <- real file, verbatim content
+```
+
+```dixscript
+// .mdix/replacements/replacements.mdix
+@DATA(
+  target_root = "src"
+
+  ignore::
+    "README.md"
+
+  overrides::
+    target("Hero.svelte", "src/lib/components/Hero.svelte")
+)
+```
+
+Running `generate --template .mdix/replacements/replacements.mdix` finds
+`Hero.svelte`, sees the override, and writes it to
+`src/lib/components/Hero.svelte` regardless of how many other files named
+`Hero.svelte` exist under `src/`.
+
+---
+
 ## Full example template
 
 ```dixscript
@@ -536,3 +671,4 @@ node bin/mdix-scaffold.js convert --template <path> -o out.json
 | `dry_run` | `false` | Preview without writing |
 | `file_strategy` | `skip` | `skip` / `overwrite` / `backup` / `rename` |
 | `mappings_file` | _(blank)_ | Path to mappings file for `[[key]]` substitution |
+| `dump_json` | `false` | Print the loaded template as JSON before generating |
