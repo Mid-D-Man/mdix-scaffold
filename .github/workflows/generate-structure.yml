@@ -68,45 +68,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Resolve DixScript-Rust master SHA
-        id: dixscript-rev
-        run: |
-          sha=$(git ls-remote https://github.com/Mid-D-Man/DixScript-Rust.git refs/heads/master | cut -f1)
-          if [ -z "$sha" ]; then
-            echo "::error::Could not resolve DixScript-Rust master SHA via git ls-remote"
-            exit 1
-          fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "DixScript-Rust master is at $sha"
-
-      - name: Cache mdix CLI binary
-        id: cache-mdix
-        uses: actions/cache@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: ~/.mdix-bin
-          key: mdix-cli-${{ runner.os }}-${{ steps.dixscript-rev.outputs.sha }}
-          restore-keys: mdix-cli-${{ runner.os }}-
+          python-version: '3.x'
 
-      - name: Build mdix CLI (cache miss only)
-        if: steps.cache-mdix.outputs.cache-hit != 'true'
+      - name: Install midmanstudio-mdix
         run: |
-          echo "Cache miss for SHA ${{ steps.dixscript-rev.outputs.sha }} — building mdix CLI from source..."
-          git clone --depth 1 https://github.com/Mid-D-Man/DixScript-Rust.git /tmp/dixscript
-          cd /tmp/dixscript
-          actual_sha=$(git rev-parse HEAD)
-          echo "Cloned commit: $actual_sha"
-          cargo build -p mdix-cli --release
-          mkdir -p ~/.mdix-bin
-          cp target/release/mdix ~/.mdix-bin/mdix
-          echo "Build complete."
-
-      - name: Install mdix to PATH
-        run: |
-          sudo cp ~/.mdix-bin/mdix /usr/local/bin/mdix
-          echo "mdix version: $(mdix --version)"
+          if [ -f "scripts/requirements.txt" ]; then
+            pip install -r scripts/requirements.txt
+          else
+            pip install midmanstudio-mdix
+          fi
+          python3 -c "from midmanstudio.mdix import MdixDatabase; print('midmanstudio-mdix OK')"
 
       - name: Resolve generation script
         id: script
@@ -125,7 +99,7 @@ jobs:
       - name: Resolve support libs
         run: |
           SCRIPT_DIR=$(dirname "${{ steps.script.outputs.path }}")
-          for lib in lib_remote.py lib_mappings.py lib_patch.py lib_replacements.py; do
+          for lib in lib_mdix_load.py lib_remote.py lib_mappings.py lib_patch.py lib_replacements.py; do
             if [ -f "scripts/$lib" ]; then
               [ "$SCRIPT_DIR" != "scripts" ] && cp "scripts/$lib" "$SCRIPT_DIR/$lib"
               echo "  local   $lib"
@@ -140,47 +114,7 @@ jobs:
       - name: Validate template
         run: |
           TMPL="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
-          echo "Validating: $TMPL"
-          mdix validate "$TMPL"
-          echo "Validation passed."
-
-      - name: Convert template to JSON
-        run: |
-          TMPL="${{ inputs.template || '.mdix/project_structure/project_structure.mdix' }}"
-          mdix convert "$TMPL" --to json --pretty -o /tmp/structure.json
-          echo "Resolved keys:"
-          python3 -c "
-          import json
-          d = json.load(open('/tmp/structure.json'))
-          for k in sorted(d.keys()):
-              print(f'  {k} = {str(d[k])[:60]}')
-          "
-
-      - name: Convert manifest to JSON (if exists)
-        run: |
-          if [ -f ".mdix/.manifest.mdix" ]; then
-            echo "Reading existing manifest..."
-            if ! mdix convert .mdix/.manifest.mdix --to json -o /tmp/manifest.json 2>&1; then
-              echo "::warning::Manifest is corrupt or uses an outdated format — resetting to first-run state."
-              rm -f .mdix/.manifest.mdix /tmp/manifest.json
-              echo "Manifest cleared. Continuing as first run."
-            fi
-          else
-            echo "No manifest found — first run."
-          fi
-
-      - name: Convert mappings to JSON (if provided)
-        run: |
-          MAPPINGS="${{ inputs.mappings_file || '' }}"
-          if [ -n "$MAPPINGS" ] && [ -f "$MAPPINGS" ]; then
-            echo "Converting mappings: $MAPPINGS"
-            mdix validate "$MAPPINGS"
-            echo "Mappings file validated."
-          elif [ -n "$MAPPINGS" ]; then
-            echo "::warning::Mappings file specified but not found: $MAPPINGS"
-          else
-            echo "No mappings file — skipping."
-          fi
+          python3 "${{ steps.script.outputs.path }}" --template "$TMPL" --validate-only
 
       - name: Generate project structure
         env:
@@ -188,15 +122,10 @@ jobs:
           OVERRIDE_STUBS: ${{ inputs.override_stubs || 'false' }}
           DRY_RUN:        ${{ inputs.dry_run || 'false' }}
           FILE_STRATEGY:  ${{ inputs.file_strategy || 'skip' }}
-          STRUCTURE_JSON: /tmp/structure.json
-          MANIFEST_JSON:  /tmp/manifest.json
           MAPPINGS_FILE:  ${{ inputs.mappings_file || '' }}
+          DUMP_JSON:      ${{ inputs.dump_json || 'false' }}
         run: |
-          if [ "${{ inputs.dump_json }}" == "true" ]; then
-            python3 ${{ steps.script.outputs.path }} --dump-json
-          else
-            python3 ${{ steps.script.outputs.path }}
-          fi
+          python3 "${{ steps.script.outputs.path }}"
 
       - name: Show git status
         if: ${{ inputs.dry_run != 'true' }}
