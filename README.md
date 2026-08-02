@@ -60,7 +60,7 @@ Fork mdix-scaffold, edit the template, run workflows from the Actions tab.
 git clone https://github.com/Mid-D-Man/mdix-scaffold.git
 cd mdix-scaffold
 
-# Install mdix CLI from source (one-time, ~3 min)
+# Install midmanstudio-mdix (one-time, pip — pre-built wheel, no Rust toolchain)
 node bin/mdix-scaffold.js setup
 
 # Generate from the default template
@@ -86,23 +86,30 @@ node bin/mdix-scaffold.js nuke --confirm DELETE
 
 ---
 
-## How the mdix CLI is sourced
+## How the Python runtime is sourced
+
+mdix-scaffold's scripts load `.mdix` files directly, in-process, via the
+published [`midmanstudio-mdix`](https://pypi.org/project/midmanstudio-mdix/)
+package — no `mdix` CLI binary, no subprocess, no JSON temp files, and no
+Rust toolchain anywhere in the path.
 
 **GitHub Actions (no local setup needed):**
 
-1. Checks a weekly binary cache for the `mdix` CLI
-2. Cache miss — clones [DixScript-Rust](https://github.com/Mid-D-Man/DixScript-Rust),
-   runs `cargo build -p mdix-cli --release`, saves to cache (~3 min, once per week)
-3. Cache hit — skips the build entirely (seconds)
+```bash
+pip install midmanstudio-mdix   # pre-built wheel — a few seconds, every run
+```
 
 **Local CLI:**
 
 ```bash
-node bin/mdix-scaffold.js setup          # builds from source once
-node bin/mdix-scaffold.js setup --force  # rebuild
+node bin/mdix-scaffold.js setup          # pip installs midmanstudio-mdix once
+node bin/mdix-scaffold.js setup --force  # reinstall / upgrade
 ```
 
-The binary is stored in `bin/mdix` and used automatically.
+Validation is best-effort without a Rust CLI in the loop: the loader
+captures the core's own diagnostic output and treats any `[Error]`-tagged
+line as a hard failure. See `scripts/lib_mdix_load.py` for the details and
+caveats.
 
 ---
 
@@ -499,8 +506,8 @@ No patch operation will crash the whole run — errors are reported and that op 
 ## CLI reference
 
 ```bash
-node bin/mdix-scaffold.js setup                              # build mdix from source
-node bin/mdix-scaffold.js setup --force                     # force rebuild
+node bin/mdix-scaffold.js setup                              # pip install midmanstudio-mdix
+node bin/mdix-scaffold.js setup --force                     # reinstall / upgrade
 node bin/mdix-scaffold.js generate                          # run default template
 node bin/mdix-scaffold.js generate --dry-run                # preview only
 node bin/mdix-scaffold.js generate --dry-run --diff         # preview + unified diffs
@@ -509,8 +516,13 @@ node bin/mdix-scaffold.js generate --mappings <path>        # [[key]] substituti
 node bin/mdix-scaffold.js generate --file-strategy overwrite
 node bin/mdix-scaffold.js generate --file-strategy backup --backup /tmp/bak
 node bin/mdix-scaffold.js generate --file-strategy rename
+node bin/mdix-scaffold.js generate --no-validate             # skip strict [Error] checking on load
+node bin/mdix-scaffold.js generate --dump-json                # print the loaded template as JSON first
 node bin/mdix-scaffold.js generate --clear-cache            # clear remote fetch cache
 node bin/mdix-scaffold.js nuke --confirm DELETE             # remove all generated files
+node bin/mdix-scaffold.js validate --template <path>         # load + validate only, no writes
+node bin/mdix-scaffold.js convert --template <path>          # dump a template as JSON (inspection)
+node bin/mdix-scaffold.js convert --template <path> -o out.json
 ```
 
 ---
