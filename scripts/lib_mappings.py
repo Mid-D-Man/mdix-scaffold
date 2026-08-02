@@ -20,9 +20,13 @@ In template content:
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from lib_mdix_load import load_table, MdixLoadError
 
 
 # ---------------------------------------------------------------------------
@@ -54,67 +58,17 @@ def load_mappings(path: str) -> dict:
 
 
 def _load_mdix(mdix_path: str) -> dict:
-    """
-    Convert a .mdix mappings file to JSON using the mdix CLI,
-    then load and flatten the result.
-    """
-    # Find mdix binary
-    mdix_bin = _find_mdix()
-    if mdix_bin is None:
+    """Load a .mdix mappings file directly via midmanstudio-mdix."""
+    try:
+        raw = load_table(mdix_path)
+    except MdixLoadError as e:
         print(
-            "ERROR: 'mdix' CLI not found — required to load .mdix mappings.\n"
-            "Run 'mdix-scaffold setup' to install it.",
+            f"ERROR: Failed to load mappings file '{mdix_path}':\n{e}",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    # Write to a temp JSON file
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    try:
-        result = subprocess.run(
-            [mdix_bin, "convert", mdix_path, "--to", "json", "-o", tmp_path],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            print(
-                f"ERROR: Failed to convert mappings file '{mdix_path}':\n"
-                f"{result.stderr.strip()}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        with open(tmp_path) as f:
-            raw = json.load(f)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
     return _flatten(raw)
-
-
-def _find_mdix() -> str | None:
-    """Return path to the mdix binary, or None if not found."""
-    # Check PATH
-    result = subprocess.run(
-        ["mdix", "--version"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        return "mdix"
-
-    # Check local bin/mdix (sibling of scripts/)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    local = os.path.join(script_dir, "..", "bin", "mdix")
-    if os.path.isfile(local) and os.access(local, os.X_OK):
-        return os.path.abspath(local)
-
-    return None
 
 
 def _flatten(d: dict, prefix: str = "") -> dict:

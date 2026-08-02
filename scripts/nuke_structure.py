@@ -7,14 +7,19 @@ Usage (local):
   python3 scripts/nuke_structure.py --confirm DELETE --template path/to/template.mdix
 
 Usage (from GitHub Actions):
-  Called by nuke-structure.yml after the mdix convert step.
+  Called by nuke-structure.yml.
 """
 
 import argparse
-import json
 import os
 import re
 import sys
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from lib_mdix_load import load_table, MdixLoadError
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +108,6 @@ def parse_args():
         default=".mdix/project_structure/project_structure.mdix",
         help="Path to the .mdix template (so we know what to remove)",
     )
-    parser.add_argument(
-        "--structure-json",
-        default=os.environ.get("STRUCTURE_JSON", "/tmp/structure.json"),
-        help="Path to the converted structure JSON (default: /tmp/structure.json)",
-    )
     return parser.parse_args()
 
 
@@ -115,7 +115,7 @@ def parse_args():
 # Main nuke logic
 # ---------------------------------------------------------------------------
 
-def run(args):
+def run(args, raw_data=None):
     if args.confirm != "DELETE":
         print(
             "ERROR: You must pass --confirm DELETE to proceed.",
@@ -123,16 +123,14 @@ def run(args):
         )
         sys.exit(1)
 
-    if not os.path.exists(args.structure_json):
-        print(
-            f"ERROR: Structure JSON not found at '{args.structure_json}'.\n"
-            "Run 'mdix convert <template> --to json' first.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if raw_data is None:
+        try:
+            raw_data = load_table(args.template)
+        except MdixLoadError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    with open(args.structure_json) as fh:
-        data = json.load(fh)
+    data = raw_data
 
     hidden_set = resolve_hidden_set(data)
     dir_groups = collect_dir_groups(data)

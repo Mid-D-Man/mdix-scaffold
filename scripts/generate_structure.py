@@ -34,6 +34,8 @@ except ImportError:
     def apply_mappings(c, m): return c
     def list_placeholders(c): return []
 
+from lib_mdix_load import load_table, MdixLoadError
+
 try:
     import lib_patch
     _HAS_PATCH = True
@@ -62,10 +64,13 @@ def parse_args():
         default=os.environ.get("DRY_RUN", "false").lower() == "true")
     p.add_argument("--diff", action="store_true", default=False)
     p.add_argument("--mappings", "-m", default=os.environ.get("MAPPINGS_FILE"))
-    p.add_argument("--structure-json",
-        default=os.environ.get("STRUCTURE_JSON", "/tmp/structure.json"))
-    p.add_argument("--manifest-json",
-        default=os.environ.get("MANIFEST_JSON", "/tmp/manifest.json"))
+    p.add_argument("--validate-only", action="store_true", default=False,
+        help="Load and validate --template, then exit without touching the filesystem.")
+    p.add_argument("--no-validate", action="store_true", default=False,
+        help="Skip strict [Error]-diagnostic checking on load (see lib_mdix_load.py).")
+    p.add_argument("--dump-json", action="store_true",
+        default=os.environ.get("DUMP_JSON", "false").lower() == "true",
+        help="Print the loaded template as JSON to stdout before generating.")
     p.add_argument("--clear-cache", action="store_true", default=False)
     p.add_argument("--no-cache",    action="store_true", default=False)
     p.add_argument("--verbose", action="store_true",
@@ -305,13 +310,15 @@ def build_all_current(data: dict, dir_groups: dict, hidden_set: set) -> set:
 # Manifest
 # ---------------------------------------------------------------------------
 
-def load_manifest(manifest_json_path: str, current_template: str = None) -> set:
+def load_manifest(current_template: str = None) -> set:
+    manifest_path = ".mdix/.manifest.mdix"
     previously_created = set()
-    if not os.path.exists(manifest_json_path):
+    if not os.path.exists(manifest_path):
         return previously_created
     try:
-        with open(manifest_json_path) as fh:
-            mdata = normalize_data(json.load(fh))
+        # strict=False: this is our own generated file, not user-authored —
+        # an imperfect manifest shouldn't block a whole generate run.
+        mdata = normalize_data(load_table(manifest_path, strict=False))
 
         manifest_template = mdata.get("template", "")
         if current_template and manifest_template:
@@ -473,19 +480,30 @@ def run_hooks(hooks, hook_type="pre", dry_run=False):
 # Main
 # ---------------------------------------------------------------------------
 
-def run(args):
+def run(args, raw_data=None):
     if args.clear_cache:
         clear_cache()
         print("Cache cleared.")
         return
 
-    with open(args.structure_json) as fh:
-        raw = json.load(fh)
+    if raw_data is None:
+        try:
+            raw_data = load_table(args.template, strict=not args.no_validate)
+        except MdixLoadError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if args.validate_only:
+        print(f"OK — '{args.template}' loaded and validated cleanly.")
+        return
+
+    if args.dump_json:
+        print(json.dumps(raw_data, indent=2, sort_keys=True, default=str))
 
     # Collapse [N] indexed flat entries back into proper arrays.
-    # This is the single point where CLI format quirks are absorbed —
+    # This is the single point where mdix's flat hashmap format is absorbed —
     # everything downstream works with plain Python lists and dicts.
-    data = normalize_data(raw)
+    data = normalize_data(raw_data)
 
     # A replacements manifest (.mdix/replacements/replacements.mdix) is a
     # different template kind entirely — detected by its fixed path, not by
@@ -500,7 +518,7 @@ def run(args):
             sys.exit(1)
         sys.exit(lib_replacements.run_replacements(data, args.template, args))
 
-    previously_created = load_manifest(args.manifest_json, current_template=args.template)
+    previously_created = load_manifest(current_template=args.template)
 
     mappings   = load_mappings(args.mappings) if args.mappings and _HAS_MAPPINGS else {}
     hidden_set = resolve_hidden_set(data)

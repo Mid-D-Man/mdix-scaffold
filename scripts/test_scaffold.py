@@ -10,10 +10,17 @@ Tests:
   5. Dry-run mode (nothing written)
   6. Diff output (unified diff printed but nothing written)
   7. Manifest creation and update
+  8. lib_mdix_load (loading the real production template end-to-end)
 
 Run:
   python3 scripts/test_scaffold.py
   python3 scripts/test_scaffold.py -v   # verbose output
+
+Unit tests inject raw_data directly (the same "key[N]"-indexed shape
+load_table() returns) so they exercise generate_structure.py / nuke_
+structure.py's own logic without depending on midmanstudio-mdix being
+installed. TestRealMdixLoad below is the one class that requires the
+real package — it's what actually proves the .mdix loading path works.
 """
 
 import argparse
@@ -22,7 +29,6 @@ import os
 import shutil
 import sys
 import tempfile
-import traceback
 import types
 import unittest
 from unittest.mock import patch
@@ -44,15 +50,15 @@ PASS = "\033[32mPASS\033[0m"
 FAIL = "\033[31mFAIL\033[0m"
 
 
-def _make_structure_json(dir_groups: dict, extras: dict | None = None) -> str:
+def _make_structure_data(dir_groups: dict, extras: dict | None = None) -> dict:
     """
-    Build a minimal structure.json that generate_structure.py can consume.
+    Build a minimal raw_data dict — the same "key[N]"-indexed shape
+    load_table() returns — for injecting straight into run().
 
     dir_groups:  { "src": [{"name": "main", "ext": "rs", "content": ""}] }
     extras:      additional top-level keys (pre_hooks, post_hooks, etc.)
     """
-    data: dict = {}
-    data["project_name"] = "test-project"
+    data: dict = {"project_name": "test-project"}
 
     for group_key, entries in dir_groups.items():
         for i, entry in enumerate(entries):
@@ -61,16 +67,11 @@ def _make_structure_json(dir_groups: dict, extras: dict | None = None) -> str:
     if extras:
         data.update(extras)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
-        json.dump(data, f)
-        return f.name
+    return data
 
 
 def _args(**kwargs):
     """Return a minimal args namespace for generate_structure.run()."""
-    import types
     ns = types.SimpleNamespace(
         template=".mdix/project_structure/project_structure.mdix",
         file_strategy="skip",
@@ -78,10 +79,14 @@ def _args(**kwargs):
         dry_run=False,
         diff=False,
         mappings=None,
-        manifest_json="/dev/null",
+        validate_only=False,
+        no_validate=False,
+        dump_json=False,
         no_cache=True,
         verbose=False,
         clear_cache=False,
+        prune=False,
+        override_stubs=False,
     )
     for k, v in kwargs.items():
         setattr(ns, k, v)
@@ -105,10 +110,10 @@ class TestCoreGeneration(unittest.TestCase):
 
     def test_creates_new_file(self):
         from generate_structure import run
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "main", "ext": "rs", "content": "fn main() {}\n"}]}
         )
-        run(_args(structure_json=sj))
+        run(_args(), raw_data=data)
         self.assertTrue(os.path.exists("src/main.rs"))
         self.assertEqual(open("src/main.rs").read(), "fn main() {}\n")
 
@@ -117,10 +122,10 @@ class TestCoreGeneration(unittest.TestCase):
         os.makedirs("src", exist_ok=True)
         with open("src/main.rs", "w") as f:
             f.write("original\n")
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "main", "ext": "rs", "content": "new\n"}]}
         )
-        run(_args(structure_json=sj, file_strategy="skip"))
+        run(_args(file_strategy="skip"), raw_data=data)
         self.assertEqual(open("src/main.rs").read(), "original\n")
 
     def test_overwrite_strategy_replaces(self):
@@ -128,10 +133,10 @@ class TestCoreGeneration(unittest.TestCase):
         os.makedirs("src", exist_ok=True)
         with open("src/main.rs", "w") as f:
             f.write("original\n")
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "main", "ext": "rs", "content": "new\n"}]}
         )
-        run(_args(structure_json=sj, file_strategy="overwrite"))
+        run(_args(file_strategy="overwrite"), raw_data=data)
         self.assertEqual(open("src/main.rs").read(), "new\n")
 
     def test_backup_strategy_copies_then_writes(self):
@@ -140,14 +145,10 @@ class TestCoreGeneration(unittest.TestCase):
         with open("src/lib.rs", "w") as f:
             f.write("old\n")
         backup_dir = os.path.join(self.tmp, "backups")
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "lib", "ext": "rs", "content": "new\n"}]}
         )
-        run(_args(
-            structure_json=sj,
-            file_strategy="backup",
-            backup=backup_dir,
-        ))
+        run(_args(file_strategy="backup", backup=backup_dir), raw_data=data)
         self.assertEqual(open("src/lib.rs").read(), "new\n")
         self.assertTrue(os.path.exists(os.path.join(backup_dir, "lib.rs")))
         self.assertEqual(open(os.path.join(backup_dir, "lib.rs")).read(), "old\n")
@@ -157,12 +158,11 @@ class TestCoreGeneration(unittest.TestCase):
         os.makedirs("src", exist_ok=True)
         with open("src/util.rs", "w") as f:
             f.write("old\n")
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "util", "ext": "rs", "content": "new\n"}]}
         )
-        run(_args(structure_json=sj, file_strategy="rename"))
+        run(_args(file_strategy="rename"), raw_data=data)
         self.assertEqual(open("src/util.rs").read(), "new\n")
-        # At least one renamed backup should exist
         renamed = [
             f for f in os.listdir("src")
             if f.startswith("util.rs.") and f != "util.rs"
@@ -171,27 +171,27 @@ class TestCoreGeneration(unittest.TestCase):
 
     def test_dry_run_creates_nothing(self):
         from generate_structure import run
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "dry", "ext": "rs", "content": "x\n"}]}
         )
-        run(_args(structure_json=sj, dry_run=True))
+        run(_args(dry_run=True), raw_data=data)
         self.assertFalse(os.path.exists("src/dry.rs"))
 
     def test_stub_default_filled_for_known_ext(self):
         from generate_structure import run
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "mod", "ext": "rs", "content": ""}]}
         )
-        run(_args(structure_json=sj))
+        run(_args(), raw_data=data)
         content = open("src/mod.rs").read()
         self.assertIn("Auto-generated stub", content)
 
     def test_root_key_maps_to_cwd(self):
         from generate_structure import run
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"root": [{"name": "README", "ext": "md", "content": "# hi\n"}]}
         )
-        run(_args(structure_json=sj))
+        run(_args(), raw_data=data)
         self.assertTrue(os.path.exists("README.md"))
 
     def test_hidden_dir_gets_dot_prefix(self):
@@ -201,23 +201,27 @@ class TestCoreGeneration(unittest.TestCase):
             "hidden_dirs[0]": {"segment": "vscode"},
             "vscode[0]": {"name": "settings", "ext": "json", "content": "{}\n"},
         }
-        sj_path = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        )
-        json.dump(data, sj_path)
-        sj_path.close()
-        run(_args(structure_json=sj_path.name))
+        run(_args(), raw_data=data)
         self.assertTrue(os.path.exists(".vscode/settings.json"))
 
     def test_manifest_written(self):
         from generate_structure import run
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"src": [{"name": "x", "ext": "py", "content": "# x\n"}]}
         )
-        run(_args(structure_json=sj))
+        run(_args(), raw_data=data)
         self.assertTrue(os.path.exists(".mdix/.manifest.mdix"))
         content = open(".mdix/.manifest.mdix").read()
         self.assertIn("src/x.py", content)
+
+    def test_validate_only_writes_nothing(self):
+        """--validate-only exits before touching the filesystem."""
+        from generate_structure import run
+        data = _make_structure_data(
+            {"src": [{"name": "main", "ext": "rs", "content": "fn main(){}\n"}]}
+        )
+        run(_args(validate_only=True), raw_data=data)
+        self.assertFalse(os.path.exists("src/main.rs"))
 
 
 class TestDeleteAndRename(unittest.TestCase):
@@ -239,10 +243,7 @@ class TestDeleteAndRename(unittest.TestCase):
             "project_name": "test",
             "delete_files[0]": {"path": "deprecated/old.rs"},
         }
-        sj = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(data, sj)
-        sj.close()
-        run(_args(structure_json=sj.name))
+        run(_args(), raw_data=data)
         self.assertFalse(os.path.exists("deprecated/old.rs"))
 
     def test_rename_pass(self):
@@ -253,10 +254,7 @@ class TestDeleteAndRename(unittest.TestCase):
             "project_name": "test",
             "rename_files[0]": {"from_path": "src/old.rs", "to_path": "src/new.rs"},
         }
-        sj = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(data, sj)
-        sj.close()
-        run(_args(structure_json=sj.name))
+        run(_args(), raw_data=data)
         self.assertFalse(os.path.exists("src/old.rs"))
         self.assertTrue(os.path.exists("src/new.rs"))
 
@@ -279,10 +277,7 @@ class TestHooks(unittest.TestCase):
             "project_name": "test",
             "post_hooks[0]": f"touch {sentinel}",
         }
-        sj = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(data, sj)
-        sj.close()
-        run(_args(structure_json=sj.name))
+        run(_args(), raw_data=data)
         self.assertTrue(os.path.exists(sentinel))
 
     def test_pre_hook_failure_aborts(self):
@@ -292,11 +287,8 @@ class TestHooks(unittest.TestCase):
             "pre_hooks[0]": "exit 1",
             "src[0]": {"name": "main", "ext": "rs", "content": "fn main(){}\n"},
         }
-        sj = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(data, sj)
-        sj.close()
         with self.assertRaises(SystemExit) as cm:
-            run(_args(structure_json=sj.name))
+            run(_args(), raw_data=data)
         self.assertEqual(cm.exception.code, 1)
         self.assertFalse(os.path.exists("src/main.rs"))
 
@@ -308,10 +300,7 @@ class TestHooks(unittest.TestCase):
             "pre_hooks[0]":  f"touch {sentinel}",
             "post_hooks[0]": f"touch {sentinel}",
         }
-        sj = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(data, sj)
-        sj.close()
-        run(_args(structure_json=sj.name, dry_run=True))
+        run(_args(dry_run=True), raw_data=data)
         self.assertFalse(os.path.exists(sentinel))
 
 
@@ -415,15 +404,13 @@ class TestRemoteContent(unittest.TestCase):
 
         mocked_content = "# MIT License\nCopyright etc.\n"
 
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"root": [{
                 "name": "LICENSE",
                 "ext":  "",
                 "content": "remote::https://example.com/MIT.txt",
             }]}
         )
-
-        import urllib.request
 
         class FakeResp:
             status = 200
@@ -432,7 +419,7 @@ class TestRemoteContent(unittest.TestCase):
             def __exit__(self, *args): pass
 
         with patch("urllib.request.urlopen", return_value=FakeResp()):
-            run(_args(structure_json=sj, no_cache=True))
+            run(_args(), raw_data=data)
 
         self.assertTrue(os.path.exists("LICENSE"))
         self.assertEqual(open("LICENSE").read(), mocked_content)
@@ -509,9 +496,7 @@ class TestMappings(unittest.TestCase):
     def test_mappings_applied_during_generate(self):
         from generate_structure import run
 
-        mappings = {"author": "MidManStudio", "version": "0.1.0"}
-
-        sj = _make_structure_json(
+        data = _make_structure_data(
             {"root": [{
                 "name": "README",
                 "ext":  "md",
@@ -530,7 +515,7 @@ class TestMappings(unittest.TestCase):
             return original_apply(content, m)
 
         with patch.object(lm, "apply_mappings", side_effect=spy_apply):
-            run(_args(structure_json=sj))
+            run(_args(), raw_data=data)
 
         # Without real mappings loaded, [[key]] stays unchanged — just
         # confirm generate didn't crash and created the file
@@ -549,21 +534,17 @@ class TestNukeStructure(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def test_confirm_required(self):
-        from nuke_structure import run, parse_args
-        import types
+        from nuke_structure import run
         args = types.SimpleNamespace(
             confirm="WRONG",
             template=".mdix/test.mdix",
-            structure_json="/dev/null",
         )
         with self.assertRaises(SystemExit):
             run(args)
 
     def test_removes_generated_files(self):
         from nuke_structure import run
-        import types
 
-        # Create files to remove
         os.makedirs("src/core", exist_ok=True)
         open("src/core/lib.rs", "w").close()
         open("src/main.rs",    "w").close()
@@ -573,24 +554,68 @@ class TestNukeStructure(unittest.TestCase):
             "src[0]": {"name": "main", "ext": "rs"},
             "src.core[0]": {"name": "lib", "ext": "rs"},
         }
-        sj = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, dir=self.tmp
-        )
-        json.dump(data, sj)
-        sj.close()
 
         args = types.SimpleNamespace(
             confirm="DELETE",
             template=".mdix/test.mdix",
-            structure_json=sj.name,
         )
-        run(args)
+        run(args, raw_data=data)
 
         self.assertFalse(os.path.exists("src/main.rs"))
         self.assertFalse(os.path.exists("src/core/lib.rs"))
-        # Empty dirs should be removed too
         self.assertFalse(os.path.isdir("src/core"))
         self.assertFalse(os.path.isdir("src"))
+
+
+class TestMdixLoad(unittest.TestCase):
+    """
+    lib_mdix_load.py — the module that replaced the mdix-cli subprocess +
+    JSON temp-file round trip. Requires midmanstudio-mdix to be installed
+    (pip install -r scripts/requirements.txt); skipped otherwise so the
+    rest of the suite stays runnable without it.
+    """
+
+    def setUp(self):
+        try:
+            import midmanstudio.mdix  # noqa: F401
+        except ImportError:
+            self.skipTest("midmanstudio-mdix not installed")
+
+    def test_load_str_flat_shape(self):
+        from lib_mdix_load import load_table_str
+        src = '@DATA(\n  root::\n    { name = "README", ext = "md", content = "# hi" }\n)\n'
+        data = load_table_str(src, label="<test>")
+        self.assertIn("root", data)
+        self.assertIsInstance(data["root"], list)
+        self.assertEqual(data["root[0]"]["name"], "README")
+
+    def test_load_str_strict_raises_on_unclosed_paren(self):
+        from lib_mdix_load import load_table_str, MdixLoadError
+        with self.assertRaises(MdixLoadError):
+            load_table_str("@DATA( port = 8080", label="<bad>", strict=True)
+
+    def test_load_str_nonstrict_does_not_raise(self):
+        from lib_mdix_load import load_table_str
+        # Same malformed source — strict=False should let it through.
+        data = load_table_str("@DATA( port = 8080", label="<bad>", strict=False)
+        self.assertIsInstance(data, dict)
+
+    def test_load_missing_file_raises(self):
+        from lib_mdix_load import load_table, MdixLoadError
+        with self.assertRaises(MdixLoadError):
+            load_table("/nonexistent/path/does-not-exist.mdix")
+
+    def test_real_production_template_loads(self):
+        """End-to-end against the actual checked-in template."""
+        from lib_mdix_load import load_table
+        template = os.path.join(
+            _SCRIPTS_DIR, "..", ".mdix", "project_structure", "project_structure.mdix"
+        )
+        if not os.path.exists(template):
+            self.skipTest("production template not present in this checkout")
+        data = load_table(template)
+        self.assertIn("project_name", data)
+        self.assertGreater(len(data), 0)
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +638,7 @@ def main():
         TestRemoteContent,
         TestMappings,
         TestNukeStructure,
+        TestMdixLoad,
     ]
 
     for cls in test_classes:
