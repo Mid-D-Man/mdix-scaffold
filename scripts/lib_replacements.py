@@ -496,14 +496,15 @@ def run_replacements(data: dict, template_path: str, args) -> int:
                 created.append(dest)
                 print(f"  NEW  {dest}")
 
+        post_hooks_ok = True
         if post_hooks:
             print()
             print("=== Post-hooks ===")
             print()
-            _run_hooks(post_hooks, "post", args.dry_run)
+            post_hooks_ok = _run_hooks(post_hooks, "post", args.dry_run)
 
         deleted_archives = []
-        if (not args.dry_run and not errors and top_level_archives
+        if (not args.dry_run and not errors and post_hooks_ok and top_level_archives
                 and getattr(args, "delete_processed_archives", False)):
             print()
             print("=== Deleting processed archives ===")
@@ -520,8 +521,9 @@ def run_replacements(data: dict, template_path: str, args) -> int:
         print()
         print(f"Done. {len(created)} created, {len(replaced)} replaced, "
               f"{skipped} skipped, {len(errors)} error(s)"
-              + (f", {len(deleted_archives)} archive(s) deleted." if deleted_archives else "."))
+              + (f", {len(deleted_archives)} archive(s) deleted." if deleted_archives else ".")
+              + ("" if post_hooks_ok else " POST-HOOK FAILURE — treating run as unsuccessful."))
 
-        return 1 if errors else 0
+        return 1 if (errors or not post_hooks_ok) else 0
     finally:
         cleanup()
