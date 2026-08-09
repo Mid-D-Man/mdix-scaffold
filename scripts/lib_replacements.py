@@ -49,6 +49,20 @@ Files can sit flat next to the manifest, or nested in subdirectories:
     path-traversal safety checks — archive contents are untrusted input
     and are validated before any extraction happens, not after.
 
+    Optional: pass delete_processed_archives=True on args (workflow input
+    `delete_processed_archives`, env `DELETE_PROCESSED_ARCHIVES`) to delete
+    a top-level archive from its real location in replacements_dir once a
+    run completes with zero errors and args.dry_run is False. This is
+    purely opt-in and off by default — stage_replacements_dir() itself
+    still never touches replacements_dir; the deletion (if requested)
+    happens afterward, in run_replacements(), and only for archives that
+    were genuinely sitting in replacements_dir (not ones that only existed
+    inside another archive's extracted contents). The point is avoiding an
+    accidental re-run of the same archive later, at the cost of losing the
+    "idempotent, nothing to lose track of" property `stage_replacements_dir`
+    otherwise guarantees — a deliberate trade the caller opts into, not a
+    default.
+
 This module is intentionally self-contained (no imports from
 generate_structure.py) to avoid a circular import, since generate_structure.py
 imports this module. The small file-write / hook-running helpers below are
@@ -212,8 +226,21 @@ def stage_replacements_dir(replacements_dir: str, ignore_names: set):
         cleanup callable); a real run only ever writes to target_root,
         exactly like every other candidate already does.
 
-    Returns (staging_dir, cleanup, extracted_archive_rel_paths). Always
-    call cleanup() when done, success or failure — wrap the caller in
+    Returns (staging_dir, cleanup, extracted_archives), where
+    extracted_archives is a list of (rel_path, is_top_level) tuples —
+    is_top_level is True only for an archive sourced directly from
+    replacements_dir itself (a real, committed file); False for an archive
+    that only existed inside another archive's extracted contents
+    (staging-only, never a real file under replacements_dir). A caller that
+    wants to act on the real committed archive file (e.g. deleting a
+    processed archive from the repo, see delete_processed_archives in
+    run_replacements below) MUST filter to is_top_level entries — deleting
+    a staging-only rel_path against replacements_dir would either no-op
+    against a path that never existed there, or, worse, coincidentally
+    collide with an unrelated real file that happens to share that
+    relative path.
+
+    Always call cleanup() when done, success or failure — wrap the caller in
     try/finally, not just a straight-line call.
 
     Raises ValueError (propagated from _extract_archive_safely) if any
@@ -258,7 +285,7 @@ def stage_replacements_dir(replacements_dir: str, ignore_names: set):
                     src = os.path.join(dirpath, f)
                     if _is_archive(f):
                         _extract_archive_safely(src, dest_dir)
-                        extracted.append(rel)
+                        extracted.append((rel, copy_needed))
                         if not copy_needed:
                             # This archive was itself sitting in staging as
                             # a byproduct of a PARENT extraction (nested
@@ -399,12 +426,17 @@ def run_replacements(data: dict, template_path: str, args) -> int:
     try:
         candidates = collect_candidates(staging_dir, ignore_names)
 
+        top_level_archives = [rel for rel, is_top in extracted_archives if is_top]
+
         print(f"Replacements   : {replacements_dir}")
         if extracted_archives:
-            print(f"Archives       : {len(extracted_archives)} extracted (staged only, "
-                  f"not written back to replacements/)")
-            for a in extracted_archives:
-                print(f"                 {a}")
+            nested_count = len(extracted_archives) - len(top_level_archives)
+            print(f"Archives       : {len(extracted_archives)} extracted "
+                  f"({len(top_level_archives)} top-level, {nested_count} nested-in-archive, "
+                  f"staged only, not written back to replacements/)")
+            for rel, is_top in extracted_archives:
+                suffix = "" if is_top else "  (nested-in-archive, staging-only)"
+                print(f"                 {rel}{suffix}")
         print(f"Target root    : {target_root}")
         print(f"Overrides      : {len(overrides)}")
         print(f"Candidates     : {len(candidates)}")
@@ -470,10 +502,25 @@ def run_replacements(data: dict, template_path: str, args) -> int:
             print()
             _run_hooks(post_hooks, "post", args.dry_run)
 
+        deleted_archives = []
+        if (not args.dry_run and not errors and top_level_archives
+                and getattr(args, "delete_processed_archives", False)):
+            print()
+            print("=== Deleting processed archives ===")
+            for rel in top_level_archives:
+                archive_path = os.path.join(replacements_dir, *rel.split("/"))
+                try:
+                    os.remove(archive_path)
+                    deleted_archives.append(archive_path)
+                    print(f"  DEL  {archive_path}")
+                except OSError as e:
+                    print(f"  WARN could not delete {archive_path}: {e}", file=sys.stderr)
+
         skipped = len(candidates) - len(created) - len(replaced) - len(errors)
         print()
         print(f"Done. {len(created)} created, {len(replaced)} replaced, "
-              f"{skipped} skipped, {len(errors)} error(s).")
+              f"{skipped} skipped, {len(errors)} error(s)"
+              + (f", {len(deleted_archives)} archive(s) deleted." if deleted_archives else "."))
 
         return 1 if errors else 0
     finally:
