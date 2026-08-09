@@ -311,29 +311,38 @@ def stage_replacements_dir(replacements_dir: str, ignore_names: set):
     return staging_dir, cleanup, extracted
 
 
-def _handle_existing(filepath, new_content, args):
+def _handle_existing(filepath, new_content, args, is_binary=False):
     """
     Returns (status_string, wrote: bool). `wrote` means "the replacement
     content is what's at filepath now" — every branch that returns
     wrote=True must actually put new_content there (respecting
     args.dry_run), not just perform its side effect and report success.
+
+    is_binary=True means new_content is bytes, not str — every write
+    branch below opens in "wb" instead of "w" in that case, and the
+    --diff path prints a one-line "binary files differ" note (like git)
+    instead of trying to unified_diff bytes as if they were text.
     """
     strategy = args.file_strategy
+    write_mode = "wb" if is_binary else "w"
 
     if getattr(args, "diff", False):
-        try:
-            with open(filepath) as f:
-                old_content = f.read()
-        except OSError:
-            old_content = ""
-        diff = list(difflib.unified_diff(
-            old_content.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
-            fromfile=f"a/{filepath}",
-            tofile=f"b/{filepath}",
-        ))
-        if diff:
-            print("".join(diff), end="")
+        if is_binary:
+            print(f"Binary files a/{filepath} and b/{filepath} differ")
+        else:
+            try:
+                with open(filepath) as f:
+                    old_content = f.read()
+            except OSError:
+                old_content = ""
+            diff = list(difflib.unified_diff(
+                old_content.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{filepath}",
+                tofile=f"b/{filepath}",
+            ))
+            if diff:
+                print("".join(diff), end="")
 
     if strategy == "skip":
         return "skipped", False
@@ -359,7 +368,7 @@ def _handle_existing(filepath, new_content, args):
             if backup_parent:
                 os.makedirs(backup_parent, exist_ok=True)
             shutil.copy2(filepath, backup_dest)
-            with open(filepath, "w") as fh:
+            with open(filepath, write_mode) as fh:
                 fh.write(new_content)
         return f"backed up -> {backup_dest}, then overwritten", True
 
@@ -367,13 +376,13 @@ def _handle_existing(filepath, new_content, args):
         new_name = f"{filepath}.{int(time.time())}"
         if not args.dry_run:
             os.rename(filepath, new_name)
-            with open(filepath, "w") as fh:
+            with open(filepath, write_mode) as fh:
                 fh.write(new_content)
         return f"renamed old -> {new_name}, wrote new at original path", True
 
     # strategy == "overwrite" (the default)
     if not args.dry_run:
-        with open(filepath, "w") as fh:
+        with open(filepath, write_mode) as fh:
             fh.write(new_content)
     return "overwritten", True
 
@@ -452,8 +461,14 @@ def run_replacements(data: dict, template_path: str, args) -> int:
 
         for rel_path in candidates:
             src_path = os.path.join(staging_dir, *rel_path.split("/"))
-            with open(src_path) as fh:
-                content = fh.read()
+            try:
+                with open(src_path, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+                is_binary = False
+            except UnicodeDecodeError:
+                with open(src_path, "rb") as fh:
+                    content = fh.read()
+                is_binary = True
 
             basename = os.path.basename(rel_path)
             is_nested = "/" in rel_path
@@ -482,7 +497,7 @@ def run_replacements(data: dict, template_path: str, args) -> int:
                 dest = matches[0] if matches else os.path.join(target_root, basename)
 
             if os.path.exists(dest):
-                status, wrote = _handle_existing(dest, content, args)
+                status, wrote = _handle_existing(dest, content, args, is_binary=is_binary)
                 print(f"  {'REP' if wrote else '---'}  {dest}  ({status})")
                 if wrote:
                     replaced.append(dest)
@@ -491,10 +506,14 @@ def run_replacements(data: dict, template_path: str, args) -> int:
                     parent = os.path.dirname(dest)
                     if parent:
                         os.makedirs(parent, exist_ok=True)
-                    with open(dest, "w") as fh:
-                        fh.write(content)
+                    if is_binary:
+                        with open(dest, "wb") as fh:
+                            fh.write(content)
+                    else:
+                        with open(dest, "w") as fh:
+                            fh.write(content)
                 created.append(dest)
-                print(f"  NEW  {dest}")
+                print(f"  NEW  {dest}" + ("  (binary)" if is_binary else ""))
 
         post_hooks_ok = True
         if post_hooks:
