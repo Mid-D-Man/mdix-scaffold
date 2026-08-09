@@ -62,6 +62,11 @@ def parse_args():
     p.add_argument("--backup", default=os.environ.get("BACKUP_DIR"))
     p.add_argument("--dry-run", action="store_true",
         default=os.environ.get("DRY_RUN", "false").lower() == "true")
+    p.add_argument("--delete-processed-archives", action="store_true",
+        default=os.environ.get("DELETE_PROCESSED_ARCHIVES", "false").lower() == "true",
+        help="Replacements pass only. After a clean, non-dry-run apply, delete "
+             "top-level archive(s) from replacements/ so they can't be "
+             "accidentally re-run later. Off by default.")
     p.add_argument("--diff", action="store_true", default=False)
     p.add_argument("--mappings", "-m", default=os.environ.get("MAPPINGS_FILE"))
     p.add_argument("--validate-only", action="store_true", default=False,
