@@ -15,6 +15,10 @@ on:
         description: 'Preview without writing anything (true/false)'
         required: false
         default: 'false'
+      delete_processed_archives:
+        description: 'Replacements pass only. After a clean, non-dry-run apply, delete top-level archive(s) from replacements/ so they cannot be accidentally re-run later (true/false)'
+        required: false
+        default: 'false'
       file_strategy:
         description: 'How to handle existing files: skip | overwrite | backup | rename'
         required: false
@@ -42,6 +46,10 @@ on:
         type: string
         default: 'false'
       dry_run:
+        required: false
+        type: string
+        default: 'false'
+      delete_processed_archives:
         required: false
         type: string
         default: 'false'
@@ -124,6 +132,7 @@ jobs:
           FILE_STRATEGY:  ${{ inputs.file_strategy || 'skip' }}
           MAPPINGS_FILE:  ${{ inputs.mappings_file || '' }}
           DUMP_JSON:      ${{ inputs.dump_json || 'false' }}
+          DELETE_PROCESSED_ARCHIVES: ${{ inputs.delete_processed_archives || 'false' }}
         run: |
           python3 "${{ steps.script.outputs.path }}"
 
